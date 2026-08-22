@@ -119,6 +119,45 @@ fn available_models_display_prefers_discovered_models_and_current_model() {
 }
 
 #[test]
+fn model_routes_mark_stale_current_model_unavailable_after_discovery() {
+    let provider = GeminiProvider::new();
+    provider.set_model("gemini-retired-pro").unwrap();
+    *provider.fetched_models.write().unwrap() = vec![
+        "gemini-3.1-pro-preview".to_string(),
+        "gemini-3-flash-preview".to_string(),
+    ];
+
+    let routes = provider.model_routes();
+    let retired = routes
+        .iter()
+        .find(|route| route.model == "gemini-retired-pro")
+        .expect("the active stale model remains visible for explanation");
+    assert!(!retired.available);
+    assert_eq!(retired.detail, "Unavailable in the current Gemini catalog");
+    assert!(
+        routes
+            .iter()
+            .filter(|route| route.model != "gemini-retired-pro")
+            .all(|route| route.available)
+    );
+    assert_eq!(
+        provider.available_models_for_switching(),
+        vec![
+            "gemini-3.1-pro-preview".to_string(),
+            "gemini-3-flash-preview".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn fallback_status_distinguishes_model_availability_from_authentication() {
+    assert_eq!(
+        fallback_status_detail("gemini-retired-pro", "gemini-3.1-pro-preview"),
+        "gemini-retired-pro is unavailable. Trying gemini-3.1-pro-preview; authentication succeeded."
+    );
+}
+
+#[test]
 fn available_models_display_without_discovery_uses_current_model_only() {
     let _guard = jcode_base::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("tempdir");

@@ -736,10 +736,13 @@ impl Provider for GeminiProvider {
                     let mut fallback_response = None;
                     let mut last_err = err;
                     for fallback_model in gemini_fallback_models(&model) {
-                        jcode_base::logging::warn(&format!(
-                            "Gemini model '{}' was not found; retrying with fallback '{}'",
-                            model, fallback_model
-                        ));
+                        let status_detail = fallback_status_detail(&model, fallback_model);
+                        jcode_base::logging::warn(&format!("{status_detail}"));
+                        let _ = tx
+                            .send(Ok(StreamEvent::StatusDetail {
+                                detail: status_detail,
+                            }))
+                            .await;
                         match provider
                             .generate_content(
                                 &state,
@@ -1048,18 +1051,44 @@ impl Provider for GeminiProvider {
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
-        self.available_models_display()
+        let discovered = self
+            .fetched_models
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        if discovered.is_empty() {
+            self.available_models_display()
+        } else {
+            merge_gemini_model_lists(discovered)
+        }
     }
 
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
+        let current = self.model();
+        let discovered = self
+            .fetched_models
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let has_discovered_catalog = !discovered.is_empty();
+
         self.available_models_display()
             .into_iter()
             .map(|model| jcode_provider_core::ModelRoute {
+                available: !has_discovered_catalog
+                    || model != current
+                    || discovered.contains(&model),
+                detail: if has_discovered_catalog
+                    && model == current
+                    && !discovered.contains(&model)
+                {
+                    "Unavailable in the current Gemini catalog".to_string()
+                } else {
+                    String::new()
+                },
                 model,
                 provider: "Gemini".to_string(),
                 api_method: "code-assist-oauth".to_string(),
-                available: true,
-                detail: String::new(),
                 cheapness: None,
             })
             .collect()
@@ -1131,6 +1160,10 @@ fn is_gemini_model_not_found_error(err: &anyhow::Error) -> bool {
     lower.contains("http 404")
         || lower.contains("\"status\": \"not_found\"")
         || lower.contains("requested entity was not found")
+}
+
+fn fallback_status_detail(current_model: &str, fallback_model: &str) -> String {
+    format!("{current_model} is unavailable. Trying {fallback_model}; authentication succeeded.")
 }
 
 #[cfg(test)]
