@@ -793,6 +793,19 @@ fn missing_thought_signature_errors_are_recognized_from_backend_bodies() {
     assert!(jcode_provider_gemini::is_missing_thought_signature_error(
         "missing a thoughtSignature"
     ));
+    // The plain Gemini (Code Assist / Developer API) runtime surfaces the same
+    // rejection with its own "Gemini ... generateContent" prefix and a
+    // `default_api:batch` call name. The gemini runtime downgrade recovery keys
+    // off this exact body, so it must classify as a missing-signature error.
+    assert!(jcode_provider_gemini::is_missing_thought_signature_error(
+        "Gemini generateContent failed: Gemini request generateContent failed (HTTP 400 Bad \
+         Request): {\"error\": {\"code\": 400, \"message\": \"Function call is missing a \
+         thought_signature in functionCall parts. This is required for tools to work correctly, \
+         and missing thought_signature may lead to degraded model performance. Additional data, \
+         function call `default_api:batch` , position 3. Please refer to \
+         https://ai.google.dev/gemini-api/docs/thought-signatures for more details.\", \
+         \"status\": \"INVALID_ARGUMENT\"}}"
+    ));
     // Unrelated failures must not trigger the lossy downgrade retry.
     assert!(!jcode_provider_gemini::is_missing_thought_signature_error(
         "Antigravity generateContent failed (HTTP 429): rate limit exceeded"
