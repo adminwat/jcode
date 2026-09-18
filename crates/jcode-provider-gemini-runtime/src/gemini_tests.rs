@@ -876,9 +876,9 @@ fn build_tools_prunes_required_names_not_defined_in_the_same_object() {
         json!(["action"]),
         "the undefined `label` requirement must be pruned from the branch"
     );
-    // Requirements that are actually defined are preserved.
     assert_eq!(parameters["required"], json!(["action"]));
     assert_eq!(parameters["properties"]["label"]["type"], json!("string"));
+    assert_eq!(parameters["properties"]["action"]["type"], json!("string"));
 }
 
 #[test]
