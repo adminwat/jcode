@@ -1451,14 +1451,22 @@ impl Provider for AnthropicProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        if self.direct_transport.api_url != API_URL {
-            // Named Anthropic-compatible profiles use their configured static
-            // model list. Never send gateway credentials to Anthropic's
-            // official hard-coded model-catalog endpoint.
-            return Ok(());
-        }
-        let (token, is_oauth) = self.get_access_token().await?;
-        if token.trim().is_empty() {
+        // A custom messages URL (ANTHROPIC_BASE_URL / named profile) must not
+        // leak gateway API keys to Anthropic's official model-catalog
+        // endpoint. Genuine Anthropic OAuth credentials are a different case:
+        // users often route /v1/messages through a local proxy (e.g. a
+        // caching proxy) while authenticating with their real subscription,
+        // and skipping the refresh for them silently freezes the model list
+        // at the last disk snapshot, hiding newly released models.
+        let custom_gateway = self.direct_transport.api_url != API_URL;
+        let (token, is_oauth) = match self.get_access_token().await {
+            Ok(pair) => pair,
+            // Preserve the old silence for gateway profiles with no usable
+            // credentials; direct Anthropic surfaces the error as before.
+            Err(_) if custom_gateway => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        if token.trim().is_empty() || (custom_gateway && !is_oauth) {
             return Ok(());
         }
 
