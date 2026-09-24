@@ -778,6 +778,82 @@ async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode(
     );
 }
 
+#[test]
+fn todo_updates_do_not_rewrite_compacted_message_prefix() {
+    struct SummaryProvider;
+    #[async_trait]
+    impl Provider for SummaryProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<EventStream> {
+            unreachable!("preparing messages must not call the provider")
+        }
+        fn name(&self) -> &str {
+            "summary-test"
+        }
+        fn supports_compaction(&self) -> bool {
+            true
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    let mut agent = Agent::new(Arc::new(SummaryProvider), Registry::empty());
+    for i in 0..10 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("turn {i}"),
+                cache_control: None,
+            }],
+        );
+    }
+    agent.session.compaction = Some(crate::session::StoredCompactionState {
+        summary_text: "Plan status: A done, B pending".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 8,
+        original_turn_count: 8,
+        compacted_count: 8,
+    });
+    agent.seed_compaction_from_session();
+    let mut todos = vec![crate::todo::TodoItem {
+        id: "B".to_string(),
+        content: "Finish B".to_string(),
+        status: "pending".to_string(),
+        priority: "high".to_string(),
+        ..Default::default()
+    }];
+    crate::todo::save_todos(agent.session_id(), &todos).unwrap();
+    let (before, _) = agent.messages_for_provider();
+    todos[0].status = "completed".to_string();
+    crate::todo::save_todos(agent.session_id(), &todos).unwrap();
+    let (after, _) = agent.messages_for_provider();
+    let stored = crate::todo::load_todos(agent.session_id()).unwrap();
+    drop(agent);
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+
+    assert_eq!(stored[0].status, "completed");
+    assert!(message_text(&before[0]).contains("Plan status: A done, B pending"));
+    assert_eq!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(&after).unwrap(),
+        "todo updates must not invalidate the cached conversation prefix"
+    );
+    assert_eq!(after[0].content.len(), 1);
+}
+
 #[tokio::test]
 async fn oversized_openai_native_compaction_is_persisted_as_text_fallback() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
