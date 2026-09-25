@@ -2211,3 +2211,66 @@ fn exhausted_window_marker_is_scoped_to_fable_for_the_fable_ladder() {
     assert!(!is_fable_scoped_limit_error("claude-opus-4-6", &annotated));
     assert!(is_fable_scoped_limit_error("claude-fable-5", &annotated));
 }
+
+/// Live end-to-end check against the real Anthropic API.
+///
+/// Ignored by default (needs network + a real OAuth token). Run with:
+///   cargo test -p jcode-provider-anthropic-runtime live_quota -- --ignored --nocapture
+///
+/// Verifies the whole chain on a genuine response rather than a fixture: send
+/// a Fable request, read the real headers, and confirm the classifiers agree
+/// that the window is exhausted, terminal, and should fall back.
+#[tokio::test]
+#[ignore = "requires network and a real Anthropic OAuth token"]
+async fn live_quota_window_classification_matches_the_real_api() {
+    let token = std::fs::read_to_string(
+        std::path::Path::new(&std::env::var("HOME").unwrap()).join(".jcode/auth.json"),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    .and_then(|auth| {
+        auth["anthropic_accounts"][0]["access"]
+            .as_str()
+            .map(str::to_string)
+    })
+    .expect("anthropic oauth token");
+
+    let response = reqwest::Client::new()
+        .post("https://api.anthropic.com/v1/messages")
+        .header("authorization", format!("Bearer {token}"))
+        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .json(&serde_json::json!({
+            "model": "claude-fable-5-1",
+            "max_tokens": 8,
+            "system": [{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}],
+            "messages": [{"role":"user","content":"hi"}],
+        }))
+        .send()
+        .await
+        .expect("request");
+
+    let status = response.status();
+    println!("live status: {status}");
+    let note = exhausted_quota_window_note(response.headers());
+    println!("live verdict: {note:?}");
+
+    if status.as_u16() != 429 {
+        println!("quota window has reset; nothing to classify");
+        return;
+    }
+
+    let note = note.expect("a real quota 429 must be classified as an exhausted window");
+    let body = response.text().await.unwrap_or_default();
+    let annotated = format!("Anthropic API error (429 Too Many Requests): {body} [{note}]");
+
+    assert!(
+        !is_retryable_error(&annotated.to_ascii_lowercase()),
+        "must not retry an exhausted window"
+    );
+    assert!(
+        is_fable_scoped_limit_error("claude-fable-5-1", &annotated),
+        "must trigger the Fable fallback"
+    );
+    println!("live chain verified: fail-fast + fallback both fire");
+}
