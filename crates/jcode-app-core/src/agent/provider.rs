@@ -141,6 +141,9 @@ impl Agent {
                 self.provider.name(),
                 self.session.provider_key.as_deref(),
             );
+        // The successful selection has a new provider key. An old typed route
+        // must not override it when this session is restored.
+        self.session.route_api_method = None;
         self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);

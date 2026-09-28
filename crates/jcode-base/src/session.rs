@@ -278,8 +278,19 @@ fn default_is_test_session() -> bool {
 
 pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
     let normalized_name = provider_name.trim().to_ascii_lowercase();
-    if normalized_name == "jcode" {
-        return Some("jcode".to_string());
+    // These native runtimes have unambiguous identities. A shared daemon's
+    // ambient provider/profile environment can belong to a different session.
+    let native_key = match normalized_name.as_str() {
+        "jcode" => Some("jcode"),
+        "gemini" => Some("gemini"),
+        "antigravity" => Some("antigravity"),
+        "github copilot" | "copilot" => Some("copilot"),
+        "cursor" => Some("cursor"),
+        "aws bedrock" | "bedrock" => Some("bedrock"),
+        _ => None,
+    };
+    if let Some(key) = native_key {
+        return Some(key.to_string());
     }
 
     if let Ok(runtime_provider) = std::env::var("JCODE_RUNTIME_PROVIDER") {
@@ -306,11 +317,7 @@ pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
     let fallback = match normalized_name.as_str() {
         "anthropic" | "claude" | "claude cli" => "claude",
         "openai" => "openai",
-        "github copilot" | "copilot" => "copilot",
         "openrouter" => "openrouter",
-        "cursor" => "cursor",
-        "gemini" => "gemini",
-        "antigravity" => "antigravity",
         "" => return None,
         other => other,
     };

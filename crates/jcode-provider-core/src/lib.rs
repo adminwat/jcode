@@ -832,9 +832,8 @@ impl RouteSelection {
             RuntimeKey::Cursor => format!("cursor:{model}"),
             RuntimeKey::Bedrock => format!("bedrock:{model}"),
             RuntimeKey::Antigravity => format!("antigravity:{model}"),
-            RuntimeKey::Gemini
-            | RuntimeKey::CodeAssistOAuth
-            | RuntimeKey::RemoteCatalog
+            RuntimeKey::Gemini | RuntimeKey::CodeAssistOAuth => format!("gemini:{model}"),
+            RuntimeKey::RemoteCatalog
             | RuntimeKey::Current
             | RuntimeKey::Other(_) => model.to_string(),
         }
@@ -1613,6 +1612,20 @@ mod tests {
                 profile_id: Some("nvidia-nim".to_string())
             }
         );
+    }
+
+    #[test]
+    fn gemini_route_selection_never_uses_ambient_compatible_endpoint() {
+        for runtime_key in [RuntimeKey::Gemini, RuntimeKey::CodeAssistOAuth] {
+            let selection = RouteSelection {
+                model: "gemini-pro-latest".into(),
+                runtime_key,
+                api_method: "code-assist-oauth".into(),
+                provider_label: "Gemini".into(),
+                detail: String::new(),
+            };
+            assert_eq!(selection.routed_model_spec(), "gemini:gemini-pro-latest");
+        }
     }
 
     #[test]
