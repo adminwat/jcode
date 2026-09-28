@@ -30,6 +30,24 @@ fn test_session_exists_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn native_session_identity_ignores_unrelated_daemon_provider() {
+    let _lock = lock_env();
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "openai");
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "gemini-api");
+    let _active = EnvVarGuard::set("JCODE_ACTIVE_PROVIDER", "openai-compatible");
+
+    for (name, key) in [
+        ("Gemini", "gemini"),
+        ("Antigravity", "antigravity"),
+        ("GitHub Copilot", "copilot"),
+        ("Cursor", "cursor"),
+        ("AWS Bedrock", "bedrock"),
+    ] {
+        assert_eq!(derive_session_provider_key(name).as_deref(), Some(key));
+    }
+}
+
+#[test]
 fn derive_session_provider_key_prefers_runtime_identity_over_transport() {
     let _lock = lock_env();
     let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "azure-openai");

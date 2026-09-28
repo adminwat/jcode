@@ -1196,6 +1196,30 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
 }
 
 #[tokio::test]
+async fn explicit_model_switch_discards_previous_route_before_restore() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(SwitchableProvider {
+        model: std::sync::Mutex::new("claude-opus-latest".to_string()),
+    });
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.session.title = Some("Route restoration regression".to_string());
+    agent.session.route_api_method = Some("openai-compatible:gemini-api".to_string());
+    agent.session.save().unwrap();
+    agent.set_model("claude-oauth:claude-opus-latest").unwrap();
+    let saved = Session::load(agent.session_id()).unwrap();
+    assert_eq!(saved.provider_key.as_deref(), Some("claude-oauth"));
+    assert_eq!(saved.route_api_method, None);
+    assert_eq!(
+        crate::provider::MultiProvider::model_switch_request_for_session_route(
+            "claude-opus-latest",
+            saved.provider_key.as_deref(),
+            saved.route_api_method.as_deref(),
+        ),
+        "claude-oauth:claude-opus-latest"
+    );
+}
+
+#[tokio::test]
 async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
     let _guard = crate::storage::lock_test_env();
     let provider = Arc::new(ExplicitPinProvider::new("z-ai/glm-5.2"));

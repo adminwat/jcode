@@ -475,8 +475,8 @@ impl MultiProvider {
                 ModelRouteApiMethod::Cursor => return format!("cursor:{model}"),
                 ModelRouteApiMethod::Bedrock => return format!("bedrock:{model}"),
                 ModelRouteApiMethod::AntigravityHttps => return format!("antigravity:{model}"),
+                ModelRouteApiMethod::CodeAssistOAuth => return format!("gemini:{model}"),
                 ModelRouteApiMethod::OpenAiCompatible { profile_id: None }
-                | ModelRouteApiMethod::CodeAssistOAuth
                 | ModelRouteApiMethod::RemoteCatalog
                 | ModelRouteApiMethod::Current
                 | ModelRouteApiMethod::Other(_) => {}
@@ -620,6 +620,20 @@ mod tests {
                 selection.provider_key.as_deref(),
                 expected_provider_key,
                 "{api_method}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_assist_route_restores_gemini_despite_stale_provider_key() {
+        for key in [None, Some("openai"), Some("openai-compatible"), Some("gemini")] {
+            assert_eq!(
+                MultiProvider::model_switch_request_for_session_route(
+                    "gemini-pro-latest",
+                    key,
+                    Some("code-assist-oauth"),
+                ),
+                "gemini:gemini-pro-latest"
             );
         }
     }
