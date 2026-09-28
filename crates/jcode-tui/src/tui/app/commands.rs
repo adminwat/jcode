@@ -120,7 +120,9 @@ pub(super) fn disable_auto_poke(app: &mut App) -> usize {
 
 #[path = "commands_auto_poke_errors.rs"]
 mod auto_poke_errors;
-pub(super) use auto_poke_errors::is_non_retryable_auto_poke_error;
+pub(super) use auto_poke_errors::{
+    is_gemini_quota_exhausted_error, is_non_retryable_auto_poke_error,
+};
 
 /// Whether `error` is a transient connectivity failure (DNS, name resolution,
 /// routing, unreachable host) that the agent itself cannot repair by resending

@@ -42,6 +42,10 @@ impl ExplicitPinProvider {
 
 #[async_trait]
 impl Provider for ExplicitPinProvider {
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
     async fn complete(
         &self,
         _messages: &[Message],
@@ -1221,6 +1225,25 @@ async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
         ["openrouter:z-ai/glm-5.2@Novita"]
     );
     assert_eq!(restored_agent.provider_model(), "z-ai/glm-5.2@Novita");
+}
+
+#[tokio::test]
+async fn provider_internal_fallback_refreshes_compaction_budget_before_next_request() {
+    let _guard = crate::storage::lock_test_env();
+    let provider = Arc::new(ExplicitPinProvider::new("unknown-model"));
+    let registry = Registry::empty();
+    let mut agent = Agent::new(provider.clone(), registry);
+    assert_eq!(agent.compaction_token_budget().await, 200_000);
+
+    // A provider fallback changes its own model, not Agent::set_model.
+    provider.set_model("gemini-2.5-pro").unwrap();
+    agent.messages_for_provider();
+    assert_eq!(agent.compaction_token_budget().await, 1_000_000);
+
+    // Also update downward so a fallback to a smaller model is safe.
+    provider.set_model("unknown-model").unwrap();
+    agent.messages_for_provider();
+    assert_eq!(agent.compaction_token_budget().await, 200_000);
 }
 
 #[tokio::test]

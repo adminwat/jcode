@@ -768,6 +768,8 @@ impl Agent {
                         let plan_context = crate::todo::format_plan_context(&self.session.id);
                         let all_messages = self.session.provider_messages();
                         if self.provider.uses_jcode_compaction() {
+                            // Providers can switch models internally during fallback.
+                            manager.set_budget(self.provider.context_window());
                             manager.set_plan_context(plan_context);
                             let action =
                                 manager.ensure_context_fits(all_messages, self.provider.clone());

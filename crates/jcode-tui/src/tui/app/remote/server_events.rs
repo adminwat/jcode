@@ -1241,9 +1241,17 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
                 return true;
             }
-            let reset_duration = retry_after_secs
-                .map(Duration::from_secs)
-                .or_else(|| parse_rate_limit_error(&message));
+            let quota_exhausted =
+                crate::tui::app::commands::is_gemini_quota_exhausted_error(&message);
+            // A long-horizon quota reset is information, not permission to queue
+            // another automatic request. Short burst rate limits still retry.
+            let reset_duration = if quota_exhausted {
+                None
+            } else {
+                retry_after_secs
+                    .map(Duration::from_secs)
+                    .or_else(|| parse_rate_limit_error(&message))
+            };
             if let Some(reset_duration) = reset_duration {
                 app.rate_limit_reset = Some(Instant::now() + reset_duration);
                 if let Some(is_system) = app
@@ -1310,6 +1318,17 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
+            if quota_exhausted {
+                app.clear_pending_remote_retry();
+                crate::tui::app::commands::stop_auto_poke_for_non_retryable_error(app, &message);
+                app.stop_overnight_auto_poke_for_non_retryable_error(&message);
+                app.push_display_message(DisplayMessage::system(
+                    "Not retrying: Gemini quota is exhausted. Wait for the reset shown above, then retry manually. The authentication route is unchanged.".to_string(),
+                ));
+                app.set_status_notice("Stopped: Gemini quota exhausted");
+                app.restore_failed_input_to_box();
+                return false;
+            }
             // Connectivity failures (DNS, connection reset, no route, transient
             // TLS, timeouts) are always transient: the request never reached the
             // provider. Hold the turn and resume when the network recovers,

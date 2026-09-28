@@ -48,6 +48,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+fn missing_file_error(path: &std::path::Path) -> anyhow::Error {
+    let resolved = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    anyhow::anyhow!(
+        "File not found: {}. Use an absolute path for a file in another directory. A shell command's cd does not change the working directory of later tool calls.",
+        resolved.display()
+    )
+}
+
 pub(crate) fn tool_name_is_allowed(allowed: &HashSet<String>, name: &str) -> bool {
     allowed.contains(name)
         || (allowed.contains("mcp") && is_mcp_tool_name(name))

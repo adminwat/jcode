@@ -339,6 +339,8 @@ impl App {
                 let discarded_oversized_native =
                     manager.discard_oversized_openai_native_compaction();
                 if self.provider.uses_jcode_compaction() {
+                    // Internal provider fallback can change the model between turns.
+                    manager.set_budget(self.provider.context_window());
                     manager.set_plan_context(plan_context);
                     let action = manager.ensure_context_fits(&base_messages, self.provider.clone());
                     match action {
