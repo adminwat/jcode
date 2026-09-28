@@ -67,6 +67,41 @@ fn mcp_test_context(working_dir: &std::path::Path) -> ToolContext {
     }
 }
 
+#[tokio::test]
+async fn missing_files_report_resolved_path_and_shell_directory_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative = "other-worktree/missing.txt";
+    let resolved = dir.path().join(relative);
+    let tools: Vec<(Box<dyn Tool>, Value)> = vec![
+        (
+            Box::new(read::ReadTool::new()),
+            serde_json::json!({"file_path":relative}),
+        ),
+        (
+            Box::new(edit::EditTool::new()),
+            serde_json::json!({"file_path":relative,"old_string":"before","new_string":"after"}),
+        ),
+        (
+            Box::new(multiedit::MultiEditTool::new()),
+            serde_json::json!({"file_path":relative,"edits":[{"old_string":"before","new_string":"after"}]}),
+        ),
+    ];
+    for (tool, input) in tools {
+        let err = tool
+            .execute(input, mcp_test_context(dir.path()))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(resolved.to_str().unwrap()),
+            "{}: {err}",
+            tool.name()
+        );
+        assert!(err.contains("absolute path"), "{err}");
+        assert!(err.contains("does not change"), "{err}");
+    }
+}
+
 async fn register_empty_mcp_tools(registry: &Registry, working_dir: &std::path::Path) {
     let pool = Arc::new(crate::mcp::SharedMcpPool::new(
         crate::mcp::McpConfig::default(),

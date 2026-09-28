@@ -134,6 +134,20 @@ fn openai_usage_limit_reached_is_non_retryable() {
 }
 
 #[test]
+fn gemini_exhausted_quota_is_not_an_auto_poke_burst_retry() {
+    use super::is_non_retryable_auto_poke_error;
+    assert!(is_non_retryable_auto_poke_error(
+        "Gemini generateContent failed: RESOURCE_EXHAUSTED QUOTA_EXHAUSTED; reset after 3h"
+    ));
+    assert!(is_non_retryable_auto_poke_error(
+        "Gemini generateContent failed: RESOURCE_EXHAUSTED: You have exhausted your capacity on this model."
+    ));
+    assert!(!is_non_retryable_auto_poke_error(
+        "Gemini generateContent failed: HTTP 429 RESOURCE_EXHAUSTED RATE_LIMIT_EXCEEDED; reset after 0s"
+    ));
+}
+
+#[test]
 fn volcengine_ark_unsupported_model_is_fatal_model_endpoint_error() {
     use super::{is_fatal_model_endpoint_error, is_non_retryable_auto_poke_error};
     let err = "OpenAI-compatible chat request failed\n  endpoint: \

@@ -1,6 +1,115 @@
 use super::*;
 use jcode_base::message::{ContentBlock, Message, Role};
 
+#[tokio::test]
+async fn oauth_fallback_preserves_quota_instead_of_final_404() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio_stream::StreamExt;
+
+    let _lock = jcode_base::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let _oauth = EnvVarGuard::set_value("JCODE_GEMINI_FORCE_OAUTH", "1");
+    let _version = EnvVarGuard::set_value("CODE_ASSIST_API_VERSION", "v1internal");
+    gemini_auth::save_tokens(&gemini_auth::GeminiTokens {
+        access_token: "test-oauth-token".into(),
+        refresh_token: "unused-test-refresh-token".into(),
+        expires_at: Utc::now().timestamp_millis() + 3_600_000,
+        email: None,
+    })
+    .unwrap();
+
+    // Cover both an initially exhausted model and quota discovered after a 404.
+    for quota_index in [0, 1] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let _endpoint = EnvVarGuard::set_value("CODE_ASSIST_ENDPOINT", &endpoint);
+        let models: Vec<_> = std::iter::once(DEFAULT_MODEL)
+            .chain(gemini_fallback_models(DEFAULT_MODEL))
+            .collect();
+        let quota_model = models[quota_index];
+        let server = tokio::spawn(async move {
+            for (index, model) in models.into_iter().enumerate() {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    assert!(socket.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    headers.push_str(&line);
+                }
+                let lower = headers.to_ascii_lowercase();
+                assert!(lower.starts_with("post /v1internal:generatecontent "));
+                assert!(lower.contains("authorization: bearer test-oauth-token"));
+                assert!(!lower.contains("x-goog-api-key"));
+                let length: usize = lower
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("content-length: ")
+                            .map(|value| value.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).await.unwrap();
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request["model"], model);
+                let (status, response) = if index == quota_index {
+                    (
+                        "429 Too Many Requests",
+                        json!({"error": {
+                            "code": 429, "status": "RESOURCE_EXHAUSTED",
+                            "message": "You have exhausted your capacity on this model. Your quota will reset after 3h.",
+                            "details": [
+                                {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED", "metadata": {"model": model}},
+                                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "10800s"}
+                            ]
+                        }}),
+                    )
+                } else {
+                    (
+                        "404 Not Found",
+                        json!({"error": {"code": 404, "status": "NOT_FOUND", "message": "Requested entity was not found."}}),
+                    )
+                };
+                let body = response.to_string();
+                socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let provider = GeminiProvider {
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            model: Arc::new(RwLock::new(DEFAULT_MODEL.into())),
+            state: Arc::new(Mutex::new(Some(GeminiRuntimeState {
+                project_id: "test-project".into(),
+                session_id: "test-session".into(),
+            }))),
+            fetched_models: Arc::new(RwLock::new(Vec::new())),
+        };
+        let mut stream = provider.complete(&[], &[], "", None).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = stream.next().await {
+                if let Err(error) = event {
+                    return error;
+                }
+            }
+            panic!("expected exhausted-quota error");
+        })
+        .await;
+        if result.is_err() {
+            server.abort();
+        }
+        let error = result.expect("fallback must not sleep through a long quota reset");
+        server.await.unwrap();
+        let message = format!("{error:#}");
+        assert!(message.contains("QUOTA_EXHAUSTED"), "{message}");
+        assert!(message.contains("10800s"), "reset delay lost: {message}");
+        assert!(message.contains(quota_model), "quota model lost: {message}");
+        assert!(!is_gemini_model_not_found_error(&error));
+    }
+}
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,

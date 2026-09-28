@@ -818,7 +818,13 @@ impl Provider for GeminiProvider {
                                 break;
                             }
                             Err(err) => {
-                                last_err = err;
+                                // A retired fallback must not hide an available
+                                // model's quota error and its reset information.
+                                if !is_gemini_quota_exhausted_error(&last_err)
+                                    || !is_gemini_model_not_found_error(&err)
+                                {
+                                    last_err = err;
+                                }
                             }
                         }
                     }

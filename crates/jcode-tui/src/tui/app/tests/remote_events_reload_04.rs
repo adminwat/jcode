@@ -309,6 +309,91 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
 }
 
 #[test]
+fn test_local_gemini_fallback_refreshes_compaction_budget() {
+    struct CompactionProvider(usize);
+    #[async_trait::async_trait]
+    impl Provider for CompactionProvider {
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self(self.0))
+        }
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[crate::message::ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            panic!("budget refresh must not send a model request");
+        }
+        fn name(&self) -> &str {
+            "gemini"
+        }
+        fn model(&self) -> String {
+            "gemini-pro-latest".into()
+        }
+        fn supports_compaction(&self) -> bool {
+            true
+        }
+        fn context_window(&self) -> usize {
+            self.0
+        }
+    }
+
+    let mut app = create_test_app();
+    for budget in [1_000_000, 200_000] {
+        app.provider = Arc::new(CompactionProvider(budget));
+        app.messages_for_provider();
+        assert_eq!(
+            app.registry.compaction().try_read().unwrap().token_budget(),
+            budget
+        );
+    }
+}
+
+#[test]
+fn test_remote_gemini_quota_stops_retries_with_or_without_auto_poke() {
+    for (auto_poke, retry_after_secs) in [
+        (false, None),
+        (true, None),
+        (false, Some(10800)),
+        (true, Some(10800)),
+    ] {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.auto_poke_incomplete_todos = auto_poke;
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "continue my work".into(),
+            images: vec![],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: true,
+            retry_attempts: 0,
+            retry_at: None,
+        });
+        app.handle_server_event(crate::protocol::ServerEvent::Error {
+            id: 22,
+            message: "Gemini generateContent failed: RESOURCE_EXHAUSTED QUOTA_EXHAUSTED; reset after 3h".into(),
+            retry_after_secs,
+        }, &mut remote);
+        assert!(app.rate_limit_pending_message.is_none());
+        assert!(app.rate_limit_reset.is_none());
+        assert!(!app.auto_poke_incomplete_todos);
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|m| m.content.contains("Not retrying"))
+        );
+        assert!(
+            !app.display_messages()
+                .iter()
+                .any(|m| m.content.contains("attempt 1/"))
+        );
+    }
+}
+
+#[test]
 fn test_remote_fatal_model_endpoint_error_fails_fast_without_retry_budget() {
     // Volcengine Ark coding-plan endpoint returning 404 UnsupportedModel can
     // never succeed on resend, so the recovery/reconnect continuation must NOT
@@ -2255,7 +2340,10 @@ fn test_externally_started_turn_adopts_processing_state_and_settles_on_done() {
         app.status
     );
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 0 }, &mut remote);
 
     // Streaming text is revealed at a paced rate, so a `Done` that arrives with

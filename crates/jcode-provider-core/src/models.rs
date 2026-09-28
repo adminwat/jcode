@@ -300,6 +300,10 @@ pub fn context_limit_for_model_with_provider_and_cache(
     if model.starts_with("gemini-2.0-flash")
         || model.starts_with("gemini-2.5")
         || model.starts_with("gemini-3")
+        || matches!(
+            model,
+            "gemini-pro-latest" | "gemini-flash-latest" | "gemini-flash-lite-latest"
+        )
     {
         return Some(1_000_000);
     }
@@ -764,6 +768,27 @@ mod tests {
             context_limit_for_model_with_provider("gemini-2.5-pro", Some("copilot")),
             Some(1_000_000)
         );
+    }
+
+    #[test]
+    fn gemini_latest_aliases_use_family_window_and_respect_overrides() {
+        for model in [
+            "gemini-pro-latest",
+            "gemini-flash-latest",
+            "gemini-flash-lite-latest",
+        ] {
+            assert_eq!(
+                context_limit_for_model_with_provider_and_cache(model, Some("gemini"), |_| None),
+                Some(1_000_000),
+                "{model} must not fall through to the generic 200k budget"
+            );
+            assert_eq!(
+                context_limit_for_model_with_provider_and_cache(model, Some("gemini"), |_| Some(
+                    64_000
+                )),
+                Some(64_000)
+            );
+        }
     }
 
     #[test]

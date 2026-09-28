@@ -159,11 +159,11 @@ impl Tool for ReadTool {
             // Try to find similar files
             let suggestions = find_similar_files(&path);
             if suggestions.is_empty() {
-                return Err(anyhow::anyhow!("File not found: {}", params.file_path));
+                return Err(super::missing_file_error(&path));
             } else {
                 return Err(anyhow::anyhow!(
-                    "File not found: {}\nDid you mean: {}",
-                    params.file_path,
+                    "{}\nDid you mean: {}",
+                    super::missing_file_error(&path),
                     suggestions.join(", ")
                 ));
             }

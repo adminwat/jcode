@@ -1,6 +1,16 @@
 //! Deterministic non-retryable auto-poke error classification.
 
+pub(crate) fn is_gemini_quota_exhausted_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("gemini")
+        && lower.contains("resource_exhausted")
+        && (lower.contains("quota_exhausted") || lower.contains("exhausted your capacity"))
+}
+
 pub(crate) fn is_non_retryable_auto_poke_error(error: &str) -> bool {
+    if is_gemini_quota_exhausted_error(error) {
+        return true;
+    }
     let lower = error.to_ascii_lowercase();
 
     // These failures are deterministic for the current request/session shape. Retrying the same
