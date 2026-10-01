@@ -974,57 +974,12 @@ impl Agent {
     /// Extract memories from the session transcript
     /// Returns the number of memories extracted, or 0 if none/skipped
     pub async fn extract_session_memories(&self) -> usize {
-        if !self.memory_enabled {
-            return 0;
-        }
-
-        // Need at least 4 messages for meaningful extraction
-        if self.session.messages.len() < 4 {
-            return 0;
-        }
-
-        logging::info(&format!(
-            "Extracting memories from {} messages",
-            self.session.messages.len()
-        ));
-
-        let transcript = self.build_transcript_for_extraction();
-
-        let sidecar = match crate::sidecar::Sidecar::for_extraction() {
-            Ok(Some(sidecar)) => sidecar,
-            Ok(None) => return 0,
-            Err(e) => {
-                logging::warn(&format!("Memory extraction unavailable: {e}"));
-                return 0;
-            }
-        };
-        match sidecar.extract_memories(&transcript).await {
-            Ok(extracted) if !extracted.is_empty() => {
-                let manager = self
-                    .session
-                    .working_dir
-                    .as_deref()
-                    .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
-                    .unwrap_or_default();
-                let mut stored_count = 0;
-
-                for memory in &extracted {
-                    match manager.remember_extracted(&memory, &self.session.id) {
-                        Ok((_, inserted)) => stored_count += usize::from(inserted),
-                        Err(e) => crate::logging::warn(&format!("Extraction storage failed: {e}")),
-                    }
-                }
-
-                if stored_count > 0 {
-                    logging::info(&format!("Extracted {} memories from session", stored_count));
-                }
-                stored_count
-            }
-            Ok(_) => 0,
-            Err(e) => {
-                logging::info(&format!("Memory extraction skipped: {}", e));
-                0
-            }
-        }
+        crate::memory_agent::extract_and_store(
+            &self.build_transcript_for_extraction(),
+            &self.session.id,
+            self.session.working_dir.as_deref(),
+            Some(self.provider.fork()),
+        )
+        .await
     }
 }

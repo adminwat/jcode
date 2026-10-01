@@ -157,21 +157,40 @@ fn manager_for_working_dir(working_dir: Option<&str>) -> MemoryManager {
 }
 
 async fn run_final_extraction(transcript: String, session_id: String, working_dir: Option<String>) {
+    extract_and_store(
+        &transcript,
+        &session_id,
+        working_dir.as_deref(),
+        crate::provider::active_provider_fork(),
+    ).await;
+}
+
+/// Grounded, idempotent extraction shared by headless, server, and local TUI paths.
+/// Extraction opt-out is independent of whether retrieval is enabled.
+pub async fn extract_and_store(
+    transcript: &str,
+    session_id: &str,
+    working_dir: Option<&str>,
+    provider: Option<Arc<dyn crate::provider::Provider>>,
+) -> usize {
+    if transcript.is_empty() {
+        return 0;
+    }
     crate::logging::info(&format!(
         "Final extraction starting for session {} ({} chars)",
         session_id,
         transcript.len()
     ));
 
-    let sidecar = match crate::sidecar::Sidecar::for_extraction() {
+    let sidecar = match crate::sidecar::Sidecar::for_extraction_with_provider(provider) {
         Ok(Some(sidecar)) => sidecar,
-        Ok(None) => return,
+        Ok(None) => return 0,
         Err(e) => {
             crate::logging::warn(&format!("Final extraction unavailable: {e}"));
-            return;
+            return 0;
         }
     };
-    let manager = manager_for_working_dir(working_dir.as_deref());
+    let manager = manager_for_working_dir(working_dir).with_skills(false);
 
     let existing: Vec<String> = manager
         .list_all()
@@ -182,7 +201,7 @@ async fn run_final_extraction(transcript: String, session_id: String, working_di
         .collect();
 
     let result = sidecar
-        .extract_memories_with_existing(&transcript, &existing)
+        .extract_memories_with_existing(transcript, &existing)
         .await;
 
     match result {
@@ -190,7 +209,7 @@ async fn run_final_extraction(transcript: String, session_id: String, working_di
             let mut stored_count = 0;
 
             for mem in &extracted {
-                match manager.remember_extracted(mem, &session_id) {
+                match manager.remember_extracted(mem, session_id) {
                     Ok((_, inserted)) => stored_count += usize::from(inserted),
                     Err(e) => {
                         crate::logging::warn(&format!("Final extraction storage failed: {e}"))
@@ -204,18 +223,21 @@ async fn run_final_extraction(transcript: String, session_id: String, working_di
                     session_id, stored_count
                 ));
             }
+            stored_count
         }
         Ok(_) => {
             crate::logging::info(&format!(
                 "Final extraction for session {}: no memories extracted",
                 session_id
             ));
+            0
         }
         Err(e) => {
             crate::logging::info(&format!(
                 "Final extraction for session {} failed: {}",
                 session_id, e
             ));
+            0
         }
     }
 }
@@ -1745,7 +1767,7 @@ pub fn trigger_final_extraction_with_dir(
     session_id: String,
     working_dir: Option<String>,
 ) {
-    if transcript.len() < 200 {
+    if transcript.is_empty() {
         return;
     }
 

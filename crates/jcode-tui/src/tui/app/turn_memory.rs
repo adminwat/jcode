@@ -133,83 +133,21 @@ impl App {
         pending
     }
 
-    /// Extract and store memories from the session transcript at end of session
+    pub(super) fn extraction_transcript(&self) -> String {
+        let messages: Vec<_> = self.session.messages.iter().map(|m| m.to_message()).collect();
+        crate::memory_agent::build_transcript_for_extraction(&messages)
+    }
+
+    /// Extract raw session evidence, not the potentially compacted provider history.
     pub(super) async fn extract_session_memories(&self) {
-        // Skip if remote mode or not enough messages
-        let provider_messages = self.materialized_provider_messages();
-        if self.is_remote || !self.memory_enabled || provider_messages.len() < 4 {
+        if self.is_remote {
             return;
         }
-
-        crate::logging::info(&format!(
-            "Extracting memories from {} messages",
-            provider_messages.len()
-        ));
-
-        let transcript = crate::memory_agent::build_transcript_for_extraction(&provider_messages);
-
-        let sidecar = match crate::sidecar::Sidecar::for_extraction() {
-            Ok(Some(sidecar)) => sidecar,
-            Ok(None) => return,
-            Err(e) => {
-                crate::logging::warn(&format!("Memory extraction unavailable: {e}"));
-                return;
-            }
-        };
-
-        // Extract memories using sidecar (with existing context for dedup)
-        let manager = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(|dir| {
-                crate::memory::MemoryManager::new()
-                    .with_project_dir(dir)
-                    .with_skills(self.active_skill.is_none())
-            })
-            .unwrap_or_else(|| {
-                crate::memory::MemoryManager::new().with_skills(self.active_skill.is_none())
-            });
-        let existing: Vec<String> = manager
-            .list_all()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|e| e.active)
-            .map(|e| e.content)
-            .collect();
-        match sidecar
-            .extract_memories_with_existing(&transcript, &existing)
-            .await
-        {
-            Ok(extracted) if !extracted.is_empty() => {
-                let manager = self
-                    .session
-                    .working_dir
-                    .as_deref()
-                    .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
-                    .unwrap_or_default();
-                let mut stored_count = 0;
-
-                for memory in extracted {
-                    match manager.remember_extracted(&memory, &self.session.id) {
-                        Ok((_, inserted)) => stored_count += usize::from(inserted),
-                        Err(e) => crate::logging::warn(&format!("Extraction storage failed: {e}")),
-                    }
-                }
-
-                if stored_count > 0 {
-                    crate::logging::info(&format!(
-                        "Extracted {} memories from session",
-                        stored_count
-                    ));
-                }
-            }
-            Ok(_) => {
-                // No memories extracted, that's fine
-            }
-            Err(e) => {
-                crate::logging::info(&format!("Memory extraction skipped: {}", e));
-            }
-        }
+        crate::memory_agent::extract_and_store(
+            &self.extraction_transcript(),
+            &self.session.id,
+            self.session.working_dir.as_deref(),
+            Some(self.provider.fork()),
+        ).await;
     }
 }

@@ -160,14 +160,15 @@ impl Sidecar {
     }
 
     pub fn for_extraction() -> Result<Option<Self>> {
+        Self::for_extraction_with_provider(crate::provider::active_provider_fork())
+    }
+
+    /// The caller supplies an isolated fork, never the interactive provider itself.
+    pub fn for_extraction_with_provider(
+        provider: Option<Arc<dyn crate::provider::Provider>>,
+    ) -> Result<Option<Self>> {
         let config = crate::config::config();
-        if !config.agents.memory_extraction_enabled.unwrap_or(config.agents.memory_sidecar_enabled) {
-            return Ok(None);
-        }
-        Self::extraction_with_config(
-            &config.agents,
-            crate::provider::active_provider_fork(),
-        )
+        Self::extraction_with_config(&config.agents, provider)
     }
 
     fn extraction_with_config(

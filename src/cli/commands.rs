@@ -2519,6 +2519,7 @@ async fn run_single_message_with_agent(
     // returning the original command result unchanged. This prevents a normal
     // one-shot exit from looking like a stale-PID crash on the next startup
     // (issue #988).
+    agent.extract_session_memories().await;
     agent.mark_closed();
     result
 }

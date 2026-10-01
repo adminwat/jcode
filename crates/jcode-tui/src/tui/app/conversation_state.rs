@@ -517,17 +517,22 @@ impl App {
     }
 
     pub(super) fn trigger_save_memory_extraction(&self) {
-        let provider_messages = self.materialized_provider_messages();
-        if self.is_remote || !self.memory_enabled || provider_messages.len() < 4 {
+        if self.is_remote {
             return;
         }
-
-        let transcript = crate::memory_agent::build_transcript_for_extraction(&provider_messages);
-        crate::memory_agent::trigger_final_extraction_with_dir(
-            transcript,
-            self.session.id.clone(),
-            self.session.working_dir.clone(),
-        );
+        let transcript = self.extraction_transcript();
+        let session_id = self.session.id.clone();
+        let working_dir = self.session.working_dir.clone();
+        let provider = self.provider.fork();
+        tokio::spawn(async move {
+            crate::memory_agent::extract_and_store(
+                &transcript,
+                &session_id,
+                working_dir.as_deref(),
+                Some(provider),
+            )
+            .await;
+        });
     }
 
     pub(super) fn memory_prompt_signature(prompt: &str) -> String {
