@@ -1116,7 +1116,7 @@ impl MemoryManager {
 
     // === Sidecar Integration ===
 
-    /// Extract memories from a session transcript using the Haiku sidecar
+    /// Extract from the JSONL evidence produced by build_transcript_for_extraction.
     pub async fn extract_from_transcript(
         &self,
         transcript: &str,
@@ -1140,7 +1140,7 @@ impl MemoryManager {
             };
 
             let entry = MemoryEntry::new(category, memory.content)
-                .with_source(session_id)
+                .with_source(format!("{session_id}#{}", memory.evidence_id))
                 .with_trust(trust);
 
             // Store in project scope by default

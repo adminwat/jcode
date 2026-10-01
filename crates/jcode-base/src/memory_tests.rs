@@ -306,8 +306,21 @@ fn extraction_context_keeps_tool_io_details() {
     ];
 
     let context = format_context_for_extraction(&messages);
-    assert!(context.contains("[Tool: memory input:"));
-    assert!(context.contains("[Tool result: ok]"));
+    let records: Vec<serde_json::Value> = context
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records[1]["kind"], "tool_call");
+    assert_eq!(records[1]["tool_name"], "memory");
+    assert_eq!(records[1]["tool_use_id"], "tool-1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(records[1]["text"].as_str().unwrap()).unwrap(),
+        json!({"action":"list"})
+    );
+    assert_eq!(records[2]["kind"], "tool_result");
+    assert_eq!(records[2]["text"], "ok");
+    assert_eq!(records[2]["tool_use_id"], "tool-1");
+    assert_eq!(records[2]["is_error"], false);
 }
 
 #[test]

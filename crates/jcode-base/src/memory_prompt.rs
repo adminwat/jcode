@@ -48,44 +48,6 @@ fn format_content_block_for_relevance(block: &crate::message::ContentBlock) -> O
     }
 }
 
-fn format_content_block_for_extraction(block: &crate::message::ContentBlock) -> Option<String> {
-    match block {
-        crate::message::ContentBlock::Text { text, .. } => {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(truncate_chars(trimmed, MEMORY_CONTEXT_MAX_BLOCK_CHARS))
-            }
-        }
-        crate::message::ContentBlock::ToolUse { name, input, .. } => {
-            let input_str =
-                serde_json::to_string(input).unwrap_or_else(|_| "<invalid json>".into());
-            let input_str = truncate_chars(&input_str, MEMORY_CONTEXT_MAX_BLOCK_CHARS / 2);
-            Some(format!("[Tool: {} input: {}]", name, input_str))
-        }
-        crate::message::ContentBlock::ToolResult {
-            content, is_error, ..
-        } => {
-            let label = if is_error.unwrap_or(false) {
-                "Tool error"
-            } else {
-                "Tool result"
-            };
-            let content = truncate_chars(content, MEMORY_CONTEXT_MAX_BLOCK_CHARS / 2);
-            Some(format!("[{}: {}]", label, content))
-        }
-        crate::message::ContentBlock::Reasoning { .. }
-        | crate::message::ContentBlock::ReasoningTrace { .. }
-        | crate::message::ContentBlock::AnthropicThinking { .. }
-        | crate::message::ContentBlock::OpenAIReasoning { .. } => None,
-        crate::message::ContentBlock::Image { .. } => Some("[Image]".to_string()),
-        crate::message::ContentBlock::OpenAICompaction { .. } => {
-            Some("[OpenAI native compaction]".to_string())
-        }
-    }
-}
-
 fn format_message_context_with(
     message: &crate::message::Message,
     format_block: fn(&crate::message::ContentBlock) -> Option<String>,
@@ -228,29 +190,98 @@ pub fn focus_query_text(raw: &str) -> String {
     }
 }
 
-/// Format messages into a wider context string for extraction.
-/// Uses a larger window than relevance checking since extraction needs to
-/// capture learnings from a broader portion of the conversation.
+/// Evidence, not prose: JSONL prevents source text from impersonating another
+/// role. IDs are stable across extraction windows; the caller adds the session.
 pub(crate) fn format_context_for_extraction(messages: &[crate::message::Message]) -> String {
-    let mut chunks: Vec<String> = Vec::new();
-    let mut total_chars = 0usize;
+    use crate::message::{ContentBlock, Role};
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
 
-    for message in messages.iter().rev().take(EXTRACTION_CONTEXT_MAX_MESSAGES) {
-        let chunk = format_message_context_with(message, format_content_block_for_extraction);
-        if chunk.is_empty() {
+    let mut records = std::collections::VecDeque::new();
+    let mut total_chars = 0usize;
+    let mut probe_turn = false;
+    let start = messages
+        .len()
+        .saturating_sub(EXTRACTION_CONTEXT_MAX_MESSAGES);
+    for (index, message) in messages.iter().enumerate() {
+        // Tool results also have role User. Only actual user text starts a turn.
+        let user_text: Vec<&str> = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. }
+                    if message.role == Role::User
+                        && !text.trim_start().starts_with("<system-reminder>") =>
+                {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        if !user_text.is_empty() {
+            let normalized = user_text
+                .join(" ")
+                .to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            probe_turn = matches!(
+                normalized.as_str(),
+                "say only ok" | "reply only ok" | "respond only ok"
+            );
+        }
+        if probe_turn || index < start {
             continue;
         }
-        let chunk_len = chunk.chars().count();
-        if total_chars + chunk_len > EXTRACTION_CONTEXT_MAX_CHARS {
-            if total_chars == 0 {
-                chunks.push(truncate_chars(&chunk, EXTRACTION_CONTEXT_MAX_CHARS));
+        for block in &message.content {
+            let (mut record, text) = match block {
+                ContentBlock::Text { text, .. }
+                    if !text.trim_start().starts_with("<system-reminder>") =>
+                {
+                    (
+                        json!({"kind": if message.role == Role::User { "user" } else { "assistant_claim" }}),
+                        text.trim().to_string(),
+                    )
+                }
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => (
+                    json!({"kind":"tool_call", "tool_use_id":id, "tool_name":name}),
+                    input.to_string(),
+                ),
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => (
+                    json!({"kind":"tool_result", "tool_use_id":tool_use_id, "is_error":is_error.unwrap_or(false)}),
+                    content.trim().to_string(),
+                ),
+                _ => continue,
+            };
+            if text.is_empty() {
+                continue;
             }
-            break;
+            record["timestamp"] = json!(message.timestamp);
+            record["truncated"] = json!(text.chars().count() > MEMORY_CONTEXT_MAX_BLOCK_CHARS);
+            record["text"] = json!(truncate_chars(&text, MEMORY_CONTEXT_MAX_BLOCK_CHARS));
+            record["id"] = json!(format!(
+                "{:x}",
+                Sha256::digest(record.to_string().as_bytes())
+            ));
+            let line = record.to_string();
+            let length = line.chars().count() + 1;
+            if length > EXTRACTION_CONTEXT_MAX_CHARS {
+                continue;
+            }
+            while total_chars + length > EXTRACTION_CONTEXT_MAX_CHARS {
+                let removed: String = records.pop_front().expect("nonempty bounded evidence");
+                total_chars -= removed.chars().count() + 1;
+            }
+            total_chars += length;
+            records.push_back(line);
         }
-        total_chars += chunk_len;
-        chunks.push(chunk);
     }
-
-    chunks.reverse();
-    chunks.join("\n").trim().to_string()
+    records.into_iter().collect::<Vec<_>>().join("\n")
 }

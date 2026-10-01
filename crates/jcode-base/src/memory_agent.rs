@@ -80,18 +80,41 @@ fn dynamic_gate_select(
 /// the current query and memory content. This deliberately abstains on vague
 /// continuations and synonym-only matches instead of treating top rank as proof.
 fn query_terms(text: &str) -> HashSet<String> {
-    let words: String = text.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
-    crate::memory_types::collect_skill_query_terms(&words).into_iter()
-        .filter(|term| !matches!(term.as_str(), "please" | "implement" | "fully" | "continue" | "proceed" | "again" | "thanks"))
+    let words: String = text
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    crate::memory_types::collect_skill_query_terms(&words)
+        .into_iter()
+        .filter(|term| {
+            !matches!(
+                term.as_str(),
+                "please" | "implement" | "fully" | "continue" | "proceed" | "again" | "thanks"
+            )
+        })
         .collect()
 }
 
-fn query_supported_candidates(query: &str, candidates: Vec<(MemoryEntry, f32)>) -> Vec<(MemoryEntry, f32)> {
+fn query_supported_candidates(
+    query: &str,
+    candidates: Vec<(MemoryEntry, f32)>,
+) -> Vec<(MemoryEntry, f32)> {
     let terms = query_terms(query);
-    if terms.len() < 2 { return Vec::new(); }
-    candidates.into_iter().filter(|(entry, rank)| {
-        rank.is_finite() && *rank > 0.0 && terms.intersection(&query_terms(&entry.content)).take(2).count() == 2
-    }).collect()
+    if terms.len() < 2 {
+        return Vec::new();
+    }
+    candidates
+        .into_iter()
+        .filter(|(entry, rank)| {
+            rank.is_finite()
+                && *rank > 0.0
+                && terms
+                    .intersection(&query_terms(&entry.content))
+                    .take(2)
+                    .count()
+                    == 2
+        })
+        .collect()
 }
 
 /// Reset surfaced memories every N turns to allow re-surfacing
@@ -123,48 +146,7 @@ static MEMORY_AGENT_STATS: Mutex<MemoryAgentStats> = Mutex::new(MemoryAgentStats
 
 /// Build a transcript string suitable for memory extraction.
 pub fn build_transcript_for_extraction(messages: &[crate::message::Message]) -> String {
-    let mut transcript = String::new();
-    for msg in messages {
-        let role = match msg.role {
-            crate::message::Role::User => "User",
-            crate::message::Role::Assistant => "Assistant",
-        };
-        transcript.push_str(&format!("**{}:**\n", role));
-        for block in &msg.content {
-            match block {
-                crate::message::ContentBlock::Text { text, .. } => {
-                    if text.trim_start().starts_with("<system-reminder>") {
-                        continue;
-                    }
-                    transcript.push_str(text);
-                    transcript.push('\n');
-                }
-                crate::message::ContentBlock::ToolUse { name, .. } => {
-                    transcript.push_str(&format!("[Used tool: {}]\n", name));
-                }
-                crate::message::ContentBlock::ToolResult { content, .. } => {
-                    let preview = if content.len() > 200 {
-                        format!("{}...", crate::util::truncate_str(content, 200))
-                    } else {
-                        content.clone()
-                    };
-                    transcript.push_str(&format!("[Result: {}]\n", preview));
-                }
-                crate::message::ContentBlock::Reasoning { .. }
-                | crate::message::ContentBlock::ReasoningTrace { .. }
-                | crate::message::ContentBlock::AnthropicThinking { .. }
-                | crate::message::ContentBlock::OpenAIReasoning { .. } => {}
-                crate::message::ContentBlock::Image { .. } => {
-                    transcript.push_str("[Image]\n");
-                }
-                crate::message::ContentBlock::OpenAICompaction { .. } => {
-                    transcript.push_str("[OpenAI native compaction]\n");
-                }
-            }
-        }
-        transcript.push('\n');
-    }
-    transcript
+    memory::format_context_for_extraction(messages)
 }
 
 fn manager_for_working_dir(working_dir: Option<&str>) -> MemoryManager {
@@ -210,7 +192,7 @@ async fn run_final_extraction(transcript: String, session_id: String, working_di
                 };
 
                 let entry = crate::memory::MemoryEntry::new(category, &mem.content)
-                    .with_source(&session_id)
+                    .with_source(format!("{session_id}#{}", mem.evidence_id))
                     .with_trust(trust);
 
                 if manager.remember_project(entry).is_ok() {
@@ -735,7 +717,7 @@ impl MemoryAgent {
         {
             let ss = self.session_state(session_id);
             ss.last_context_embedding = Some(context_embedding.clone());
-            ss.last_context_string = Some(context.clone());
+            ss.last_context_string = Some(memory::format_context_for_extraction(&messages));
         }
 
         // Hybrid retrieval must use the same representation for both halves of
@@ -1037,7 +1019,10 @@ impl MemoryAgent {
         query: &str,
         candidates: Vec<(MemoryEntry, f32)>,
     ) -> Vec<MemoryEntry> {
-        let selected = dynamic_gate_select(query_supported_candidates(query, candidates), MAX_MEMORIES_PER_TURN);
+        let selected = dynamic_gate_select(
+            query_supported_candidates(query, candidates),
+            MAX_MEMORIES_PER_TURN,
+        );
         for (entry, sim) in &selected {
             crate::logging::info(&format!(
                 "[{}] Memory query-supported (rules fallback, RRF rank={:.5}): {}",
@@ -1108,11 +1093,13 @@ impl MemoryAgent {
         let session_id_owned = session_id.to_string();
 
         let existing: Vec<String> = {
-            let context_summary = if context_owned.len() > 2000 {
-                &context_owned[context_owned.len() - 2000..]
-            } else {
-                &context_owned
-            };
+            let start = context_owned
+                .char_indices()
+                .rev()
+                .nth(1_999)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let context_summary = &context_owned[start..];
             match memory_manager.find_similar(context_summary, 0.25, 80) {
                 Ok(similar) if !similar.is_empty() => similar
                     .into_iter()
@@ -1251,7 +1238,7 @@ impl MemoryAgent {
 
                         // Create the new memory
                         let entry = memory::MemoryEntry::new(category, &mem.content)
-                            .with_source("incremental")
+                            .with_source(format!("{session_id_owned}#{}", mem.evidence_id))
                             .with_trust(trust);
 
                         match memory_manager.remember_project(entry) {

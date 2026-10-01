@@ -146,49 +146,7 @@ impl App {
             provider_messages.len()
         ));
 
-        // Build transcript from messages
-        let mut transcript = String::new();
-        for msg in &provider_messages {
-            let role = match msg.role {
-                Role::User => "User",
-                Role::Assistant => "Assistant",
-            };
-            transcript.push_str(&format!("**{}:**\n", role));
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text, .. } => {
-                        if text.trim_start().starts_with("<system-reminder>") {
-                            continue;
-                        }
-                        transcript.push_str(text);
-                        transcript.push('\n');
-                    }
-                    ContentBlock::ToolUse { name, .. } => {
-                        transcript.push_str(&format!("[Used tool: {}]\n", name));
-                    }
-                    ContentBlock::ToolResult { content, .. } => {
-                        // Truncate long results
-                        let preview = if content.len() > 200 {
-                            format!("{}...", crate::util::truncate_str(content, 200))
-                        } else {
-                            content.clone()
-                        };
-                        transcript.push_str(&format!("[Result: {}]\n", preview));
-                    }
-                    ContentBlock::Reasoning { .. }
-                    | ContentBlock::ReasoningTrace { .. }
-                    | ContentBlock::AnthropicThinking { .. }
-                    | ContentBlock::OpenAIReasoning { .. } => {}
-                    ContentBlock::Image { .. } => {
-                        transcript.push_str("[Image]\n");
-                    }
-                    ContentBlock::OpenAICompaction { .. } => {
-                        transcript.push_str("[OpenAI native compaction]\n");
-                    }
-                }
-            }
-            transcript.push('\n');
-        }
+        let transcript = crate::memory_agent::build_transcript_for_extraction(&provider_messages);
 
         if !crate::memory::memory_llm_judge_available() {
             crate::logging::info("Memory extraction skipped: LLM judge unavailable");
@@ -241,8 +199,7 @@ impl App {
 
                     // Create memory entry
                     let entry = crate::memory::MemoryEntry::new(category, memory.content)
-                        .with_id(format!("auto_{}", chrono::Utc::now().timestamp_millis()))
-                        .with_source(self.session.id.clone())
+                        .with_source(format!("{}#{}", self.session.id, memory.evidence_id))
                         .with_trust(trust);
 
                     // Store memory

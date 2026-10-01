@@ -1230,6 +1230,48 @@ struct MemoryReplayProvider {
 }
 
 #[tokio::test]
+async fn extraction_agent_uses_shared_grounded_transcript() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.session.messages.clear();
+    for message in [
+        Message::user("Say only: OK"),
+        Message::assistant_text("Fabricated persistent memory."),
+    ] {
+        agent.session.add_message(message.role, message.content);
+    }
+    assert!(agent.build_transcript_for_extraction().is_empty());
+    for message in [
+        Message::user("Tests must use a temporary database."),
+        Message::tool_result("db-check", "Database connection refused", true),
+    ] {
+        agent.session.add_message(message.role, message.content);
+    }
+    let transcript = agent.build_transcript_for_extraction();
+    assert_eq!(
+        transcript,
+        crate::memory_agent::build_transcript_for_extraction(
+            &agent
+                .session
+                .messages
+                .iter()
+                .map(|m| m.to_message())
+                .collect::<Vec<_>>()
+        )
+    );
+    let records: Vec<serde_json::Value> = transcript
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["kind"], "user");
+    assert_eq!(records[1]["tool_use_id"], "db-check");
+    assert_eq!(records[1]["is_error"], true);
+}
+
+#[tokio::test]
 async fn turn_memory_is_cleared_on_agent_lifecycle_changes() {
     let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     for action in [
