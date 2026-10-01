@@ -70,9 +70,16 @@ success), `JCODE_HOOK_ERROR` (on failure).
 
 ## Context response hook: `turn_context`
 
-This protocol is opt-in and distinct from detached observers. The transport is
-available through `hooks::run_turn_context`; provider-loop integration is a
-separate consumer and is not implied merely by configuring a command.
+This protocol is opt-in and distinct from detached observers. Agent blocking and
+streaming provider loops await it before the first request, then replay the same
+evidence during tool continuations. The query comes from the current turn's
+durable user-message anchor, including on resume, never a later tool result.
+Abstentions and failures are cached for that turn too. A new user turn queries
+again. Disabling memory or hooks suppresses delivery, and session reset/close/crash
+clears the Agent cache. External context is always ephemeral, even when native
+memory persistence is enabled. Source and record IDs are logged, not record text.
+Streaming clients receive one memory event per prepared nonempty result.
+This does not configure external-store readers or change existing installations.
 
 A scalar command or array of up to four commands is supported. Commands run in
 parallel within one **1500ms deadline**, including stdin writes, stdout reads,

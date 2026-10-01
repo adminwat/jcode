@@ -132,6 +132,9 @@ impl Agent {
             {
                 messages_with_memory.push(memory_msg);
             }
+            if let Some((message, _, _)) = self.prepare_external_memory_injection().await {
+                messages_with_memory.push(message);
+            }
             if Self::should_inject_batch_nudge(
                 batch_nudge_pending,
                 tools.iter().any(|tool| tool.name == "batch"),

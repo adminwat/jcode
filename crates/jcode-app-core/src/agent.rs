@@ -246,6 +246,7 @@ pub struct Agent {
     agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
+    external_turn_memory: Option<prompting::ExternalTurnMemory>,
     /// One-step undo snapshot captured before the most recent rewind.
     rewind_undo_snapshot: Option<RewindUndoSnapshot>,
     /// Channel for tools to request stdin input from the user
@@ -335,6 +336,7 @@ impl Agent {
             system_prompt_override: None,
             agents_md_snapshot,
             memory_enabled: crate::config::config().features.memory,
+            external_turn_memory: None,
             rewind_undo_snapshot: None,
             stdin_request_tx: None,
             provider_runtime_state: ProviderRuntimeState::observed(initial_provider_model),
@@ -628,6 +630,7 @@ impl Agent {
 
     fn reset_runtime_state_for_session_change(&mut self) {
         crate::memory::clear_pending_memory(&self.session.id);
+        self.external_turn_memory = None;
         self.active_skill = None;
         self.last_upstream_provider = None;
         self.last_connection_type = None;
@@ -972,6 +975,7 @@ impl Agent {
     /// Mark this agent session as closed and persist it.
     pub fn mark_closed(&mut self) {
         crate::memory::clear_pending_memory(&self.session.id);
+        self.external_turn_memory = None;
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_closed();
@@ -1005,6 +1009,7 @@ impl Agent {
 
     pub fn mark_crashed(&mut self, message: Option<String>) {
         crate::memory::clear_pending_memory(&self.session.id);
+        self.external_turn_memory = None;
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_crashed(message);

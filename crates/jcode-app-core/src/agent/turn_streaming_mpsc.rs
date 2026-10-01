@@ -207,6 +207,30 @@ impl Agent {
                 }
                 messages_with_memory.push(memory_msg);
             }
+            if let Some((message, count, first_delivery)) =
+                self.prepare_external_memory_injection().await
+            {
+                if first_delivery {
+                    let prompt = message
+                        .content
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let _ = event_tx.send(ServerEvent::MemoryInjected {
+                        count,
+                        prompt_chars: prompt.chars().count(),
+                        prompt,
+                        display_prompt: None,
+                        computed_age_ms: 0,
+                    });
+                }
+                ephemeral_signature_messages.push(message.clone());
+                messages_with_memory.push(message);
+            }
 
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",

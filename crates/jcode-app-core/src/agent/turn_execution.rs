@@ -359,6 +359,7 @@ impl Agent {
         self.memory_enabled = enabled;
         if !enabled {
             crate::memory::clear_pending_memory(&self.session.id);
+            self.external_turn_memory = None;
         }
     }
 
