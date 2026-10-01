@@ -1,5 +1,58 @@
 use super::*;
 
+#[test]
+fn prompt_overlay_same_file_is_loaded_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join(".jcode");
+    std::fs::create_dir(&project).unwrap();
+    let file = project.join("prompt-overlay.md");
+    std::fs::write(&file, "one overlay").unwrap();
+    let (prompt, bytes) = load_prompt_overlay_files_from_dirs(dir.path(), Some(&file));
+    assert_eq!(prompt.unwrap().matches("one overlay").count(), 1);
+    assert_eq!(bytes, "one overlay".len());
+}
+
+#[test]
+fn prompt_overlay_distinct_and_missing_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".jcode")).unwrap();
+    let project = dir.path().join(".jcode/prompt-overlay.md");
+    let global = dir.path().join("global.md");
+    std::fs::write(&project, "project words").unwrap();
+    std::fs::write(&global, "global words").unwrap();
+    let (prompt, bytes) = load_prompt_overlay_files_from_dirs(dir.path(), Some(&global));
+    let prompt = prompt.unwrap();
+    assert!(prompt.find("project words").unwrap() < prompt.find("global words").unwrap());
+    assert_eq!(bytes, "project words".len() + "global words".len());
+    std::fs::remove_file(&project).unwrap();
+    assert_eq!(
+        load_prompt_overlay_files_from_dirs(dir.path(), Some(&global)).1,
+        "global words".len()
+    );
+    std::fs::remove_file(&global).unwrap();
+    assert_eq!(
+        load_prompt_overlay_files_from_dirs(dir.path(), Some(&global)),
+        (None, 0)
+    );
+    assert_eq!(
+        load_prompt_overlay_files_from_dirs(dir.path(), Some(dir.path())),
+        (None, 0)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prompt_overlay_symlink_is_loaded_once() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".jcode")).unwrap();
+    let global = dir.path().join("global.md");
+    std::fs::write(&global, "linked overlay").unwrap();
+    std::os::unix::fs::symlink(&global, dir.path().join(".jcode/prompt-overlay.md")).unwrap();
+    let (prompt, bytes) = load_prompt_overlay_files_from_dirs(dir.path(), Some(&global));
+    assert_eq!(prompt.unwrap().matches("linked overlay").count(), 1);
+    assert_eq!(bytes, "linked overlay".len());
+}
+
 /// Verify the default system prompt does NOT identify as "Claude Code"
 /// It's fine to say "powered by Claude" but not "Claude Code" (Anthropic's product)
 #[test]

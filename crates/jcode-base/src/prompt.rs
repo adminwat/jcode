@@ -976,6 +976,17 @@ pub fn load_agents_md_files_from_dir(working_dir: Option<&Path>) -> (Option<Stri
 
 /// Load optional prompt overlay markdown from ~/.jcode/ and ./.jcode/
 fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, usize) {
+    let project_dir = working_dir.unwrap_or(Path::new("."));
+    let global = crate::storage::jcode_dir()
+        .ok()
+        .map(|dir| dir.join("prompt-overlay.md"));
+    load_prompt_overlay_files_from_dirs(project_dir, global.as_deref())
+}
+
+fn load_prompt_overlay_files_from_dirs(
+    project_dir: &Path,
+    global_overlay: Option<&Path>,
+) -> (Option<String>, usize) {
     let mut contents = vec![];
     let mut total_chars = 0usize;
 
@@ -991,18 +1002,29 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
         }
     };
 
-    let project_dir = working_dir.unwrap_or(Path::new("."));
+    let project_overlay = project_dir.join(".jcode").join("prompt-overlay.md");
     if let Some((content, size)) = load_file(
-        &project_dir.join(".jcode").join("prompt-overlay.md"),
+        &project_overlay,
         "Project Prompt Overlay (.jcode/prompt-overlay.md)",
     ) {
         total_chars += size;
         contents.push(content);
     }
 
-    if let Ok(global_overlay) = crate::storage::jcode_dir().map(|dir| dir.join("prompt-overlay.md"))
+    let global_duplicates_project = global_overlay.is_some_and(|global_overlay| {
+        match (
+            std::fs::canonicalize(&project_overlay),
+            std::fs::canonicalize(global_overlay),
+        ) {
+            (Ok(project), Ok(global)) => project == global,
+            _ => false,
+        }
+    });
+
+    if !global_duplicates_project
+        && let Some(global_overlay) = global_overlay
         && let Some((content, size)) = load_file(
-            &global_overlay,
+            global_overlay,
             "Global Prompt Overlay (~/.jcode/prompt-overlay.md)",
         )
     {
