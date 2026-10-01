@@ -13,6 +13,47 @@ impl Drop for LocalTurnMemory {
 }
 
 impl App {
+    /// Local mode has no daemon Agent to report its outcome. Emit raw, anchored
+    /// records here even when recall is disabled. Remote clients never duplicate it.
+    pub(super) fn fire_local_turn_end_hook(
+        &self,
+        status: &str,
+        started: Instant,
+        error: Option<String>,
+    ) {
+        if self.is_remote || !crate::hooks::hook_configured("turn_end") {
+            return;
+        }
+        let records = crate::hooks::turn_records(&self.session);
+        let mut event = crate::hooks::HookEvent::new("turn_end")
+            .session_id(self.session.id.clone())
+            .field("STATUS", status)
+            .field("DURATION_MS", started.elapsed().as_millis().to_string())
+            .field("MODEL", self.provider.model())
+            .field("TURN_RECORDS_JSON", records.to_string());
+        if let Some(turn_id) = &self.session.model_usage_turn_id {
+            event = event.field("TURN_ID", turn_id);
+        }
+        if let Some(cwd) = &self.session.working_dir {
+            event = event.cwd(cwd);
+        }
+        if let Some(text) = records["records"].as_array().and_then(|rows| {
+            rows.iter()
+                .rev()
+                .find(|row| row["kind"] == "assistant_claim")
+                .and_then(|row| row["text"].as_str())
+        }) {
+            event = event.field(
+                "LAST_ASSISTANT_TEXT",
+                text.chars().take(4000).collect::<String>(),
+            );
+        }
+        if let Some(error) = error {
+            event = event.field("ERROR", error);
+        }
+        crate::hooks::dispatch_observer(event);
+    }
+
     pub(super) fn clear_local_memory(&mut self) {
         self.local_turn_memory = None;
         if !self.is_remote {

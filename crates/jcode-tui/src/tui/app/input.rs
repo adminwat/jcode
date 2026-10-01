@@ -3734,10 +3734,18 @@ impl App {
     }
 
     pub(super) fn commit_local_interleave(&mut self, content: &str) {
-        let message = Message::user_with_images(content, std::mem::take(&mut self.interleave_images));
-        self.add_provider_message(message.clone());
         let synthetic = self.pending_transfer_request
             && content == super::commands::transfer_pause_message();
+        if !synthetic {
+            self.fire_local_turn_end_hook(
+                "interrupted",
+                self.processing_started.unwrap_or_else(Instant::now),
+                None,
+            );
+            self.processing_started = Some(Instant::now());
+        }
+        let message = Message::user_with_images(content, std::mem::take(&mut self.interleave_images));
+        self.add_provider_message(message.clone());
         let id = self.session.add_message_with_display_role(
             Role::User,
             message.content,

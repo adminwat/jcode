@@ -313,3 +313,194 @@ async fn local_memory_request_missing_anchor_and_remote_abstain() {
     );
     crate::memory::clear_pending_memory(&app.session.id);
 }
+
+#[derive(Clone)]
+struct RetentionProvider(Arc<std::sync::atomic::AtomicUsize>);
+#[async_trait::async_trait]
+impl Provider for RetentionProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _: &[crate::message::ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        use crate::message::StreamEvent;
+        if request_text(messages).contains("retention-error-fixture") {
+            anyhow::bail!("local-retention-error-canary");
+        }
+        let first = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+        let events = if first {
+            vec![
+                StreamEvent::ToolUseStart {
+                    id: "local-evidence-tool".into(),
+                    name: "memory_fixture".into(),
+                },
+                StreamEvent::ToolInputDelta("{}".into()),
+                StreamEvent::ToolUseEnd,
+                StreamEvent::MessageEnd {
+                    stop_reason: Some("tool_use".into()),
+                },
+            ]
+        } else {
+            vec![
+                StreamEvent::TextDelta("Assistant claims are not verified facts.".into()),
+                StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".into()),
+                },
+            ]
+        };
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+    fn name(&self) -> &str {
+        "local-retention-fixture"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+struct RetentionTool;
+#[async_trait::async_trait]
+impl crate::tool::Tool for RetentionTool {
+    fn name(&self) -> &str {
+        "memory_fixture"
+    }
+    fn description(&self) -> &str {
+        "isolated memory evidence fixture"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object"})
+    }
+    async fn execute(
+        &self,
+        _: serde_json::Value,
+        _: crate::tool::ToolContext,
+    ) -> Result<crate::tool::ToolOutput> {
+        Ok(crate::tool::ToolOutput::new(
+            "Database migration verified by the fixture tool.",
+        ))
+    }
+}
+
+// Run under a persistent PTY with stdin kept open. An EOF-fed `script` sends a
+// cancellation event and does not exercise the provider/tool completion path.
+// This exercises the real terminal/provider/tool loop, not a copied completion helper.
+#[tokio::test]
+#[ignore = "requires a real PTY, deliberately exercised by local runtime acceptance"]
+async fn local_turn_retention_real_terminal() {
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let script = home.root().join("capture-local-retention.py");
+    let calls = home.root().join("local-retention.jsonl");
+    std::fs::write(&script, r#"import os, pathlib
+fd=os.open(pathlib.Path(__file__).with_name('local-retention.jsonl'),os.O_WRONLY|os.O_APPEND|os.O_CREAT,0o600)
+os.write(fd,(os.environ['JCODE_HOOK_PAYLOAD']+'\n').encode())
+os.close(fd)
+"#).unwrap();
+    let _env = HookEnv::new("");
+    crate::env::set_var(
+        "JCODE_HOOK_TURN_END",
+        format!("python3 {}", script.display()),
+    );
+    crate::config::invalidate_config_cache();
+    let provider: Arc<dyn Provider> = Arc::new(RetentionProvider(Default::default()));
+    let registry = Registry::new(provider.clone()).await;
+    registry
+        .register("memory_fixture".into(), Arc::new(RetentionTool))
+        .await;
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.is_remote = false;
+    app.memory_enabled = false;
+    app.ambient_system_prompt = Some("isolated local retention test".into());
+    anchor(&mut app, "prior-turn-secret-canary");
+    let mut terminal = ratatui::Terminal::with_options(
+        ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
+        },
+    )
+    .unwrap();
+    crossterm::terminal::enable_raw_mode().unwrap();
+    struct Raw;
+    impl Drop for Raw {
+        fn drop(&mut self) {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+    let _raw = Raw;
+    let mut input = crossterm::event::EventStream::new();
+    for (index, query) in [
+        "Tests must use a temporary database.",
+        "queued user must stay distinct",
+        "Say only: OK",
+        "retention-error-fixture",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index == 1 {
+            app.queued_messages.push(query.into());
+            app.process_queued_messages(&mut terminal, &mut input).await;
+        } else {
+            app.input = query.into();
+            app.submit_input();
+            let result = app
+                .run_turn_interactive(&mut terminal, &mut input, None)
+                .await;
+            assert_eq!(result.is_err(), index == 3, "{result:?}");
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let events = loop {
+            let rows: Vec<serde_json::Value> = std::fs::read_to_string(&calls)
+                .unwrap_or_default()
+                .lines()
+                .map(|s| serde_json::from_str(s).unwrap())
+                .collect();
+            if rows.len() == index + 1 {
+                break rows;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "missing real local turn_end for {query}, found {}",
+                rows.len()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let event = events.last().unwrap();
+        assert_eq!(event["session_id"], app.session.id);
+        assert_eq!(
+            event["turn_id"],
+            app.session.model_usage_turn_id.clone().unwrap()
+        );
+        assert_eq!(event["status"], if index == 3 { "error" } else { "ok" }, "event={event}; display={:?}; source={:?}", app.display_messages.iter().map(|m| &m.content).collect::<Vec<_>>(), app.session.messages);
+        let records: serde_json::Value =
+            serde_json::from_str(event["turn_records_json"].as_str().unwrap()).unwrap();
+        assert!(!records.to_string().contains("prior-turn-secret-canary"));
+        if index == 2 {
+            assert_eq!(records["coverage"], "probe");
+            assert_eq!(records["records"], serde_json::json!([]));
+        } else {
+            assert_eq!(records["records"][0]["text"], query);
+        }
+        if index == 0 {
+            for kind in ["user", "tool_call", "tool_result", "assistant_claim"] {
+                assert!(
+                    records["records"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|r| r["kind"] == kind),
+                    "missing {kind}: {records}"
+                );
+            }
+        }
+        if index == 3 {
+            assert!(
+                event["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("local-retention-error-canary")
+            );
+        }
+        app.is_processing = false;
+    }
+}

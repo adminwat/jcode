@@ -27,8 +27,31 @@ impl App {
         &mut self,
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
-        mut bus_receiver: Option<&mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>>,
+        bus_receiver: Option<&mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>>,
     ) -> Result<()> {
+        let started = Instant::now();
+        let result = self
+            .run_turn_interactive_inner(terminal, event_stream, bus_receiver)
+            .await;
+        let status = match &result {
+            Ok(true) => "ok",
+            Ok(false) => "incomplete",
+            Err(_) => "error",
+        };
+        self.fire_local_turn_end_hook(
+            status,
+            started,
+            result.as_ref().err().map(ToString::to_string),
+        );
+        result.map(|_| ())
+    }
+
+    async fn run_turn_interactive_inner(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        event_stream: &mut EventStream,
+        mut bus_receiver: Option<&mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>>,
+    ) -> Result<bool> {
         let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
         let mut redraw_period = crate::tui::redraw_interval(self);
         let mut redraw_interval = super::run_shell::redraw_timer(redraw_period);
@@ -67,7 +90,7 @@ impl App {
                 );
                 self.push_display_message(DisplayMessage::error(message));
                 self.set_status_notice("Recovery needed");
-                return Ok(());
+                return Ok(false);
             }
 
             let (provider_messages, compaction_event) = self.messages_for_provider();
@@ -125,7 +148,7 @@ impl App {
                                         self.streaming_tool_calls.clear();
                                         self.schedule_queued_dispatch_after_interrupt();
                                         self.push_display_message(DisplayMessage::system("Interrupted"));
-                                        return Ok(());
+                                        return Ok(false);
                                     }
                                     if !scroll_only {
                                         status_spinner_renderer.draw_full(self, terminal)?;
@@ -348,7 +371,7 @@ impl App {
                                         self.streaming_tool_calls.clear();
                                         self.schedule_queued_dispatch_after_interrupt();
                                         self.push_display_message(DisplayMessage::system("Interrupted"));
-                                        return Ok(());
+                                        return Ok(false);
                                     }
                                     // Check for interleave request (Shift+Enter)
                                     if let Some(interleave_msg) = self.interleave_message.take() {
@@ -386,10 +409,11 @@ impl App {
                                             if !content_blocks.is_empty() {
                                                 self.add_provider_message(Message {
                                                     role: Role::Assistant,
-                                                    content: content_blocks,
+                                                    content: content_blocks.clone(),
                                                     timestamp: Some(chrono::Utc::now()),
                                                     tool_duration_ms: None,
                                                 });
+                                                self.session.add_message(Role::Assistant, content_blocks);
                                             }
                                             // Add display message for partial response
                                             if !self.streaming.streaming_text.is_empty() {
@@ -1313,7 +1337,7 @@ impl App {
                                             self.batch_progress = None;
                                             self.schedule_queued_dispatch_after_interrupt();
                                             self.push_display_message(DisplayMessage::system("Interrupted"));
-                                            return Ok(());
+                                            return Ok(false);
                                         }
 
                                         if !scroll_only {
@@ -1462,6 +1486,6 @@ impl App {
 
         super::commands::maybe_trigger_autoreview_local(self);
         super::commands::maybe_trigger_autojudge_local(self);
-        Ok(())
+        Ok(true)
     }
 }
