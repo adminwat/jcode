@@ -408,7 +408,7 @@ impl App {
                                             }
                                         }
                                         // Add user's interleaved message
-                                        self.add_provider_message(Message::user(&interleave_msg));
+                                        self.commit_local_interleave(&interleave_msg);
                                         self.push_display_message(DisplayMessage {
                                             role: "user".to_string(),
                                             content: interleave_msg,

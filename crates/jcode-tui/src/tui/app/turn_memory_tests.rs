@@ -170,3 +170,146 @@ print(json.dumps(dict(version=1,session_id=r['session_id'],turn_id=r['turn_id'],
     assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 2);
     assert!(!app.extraction_transcript().contains("external-local"));
 }
+
+#[tokio::test]
+async fn local_memory_request_human_input_boundaries_replace_the_anchor() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let _env = HookEnv::new("");
+    let mut app = app().await;
+    for image in [false, true] {
+        app.input = "user memory question".into();
+        if image {
+            app.pending_images
+                .push(("image/png".into(), "fixture".into()));
+        }
+        app.submit_input();
+        let source = app.session.messages.last().unwrap();
+        assert_eq!(
+            app.session.model_usage_turn_id,
+            Some(format!("{}:{}", app.session.id, source.id))
+        );
+        assert_eq!(
+            source
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Image { .. })),
+            image
+        );
+    }
+    let old = app.session.model_usage_turn_id.clone().unwrap();
+    crate::memory::begin_turn_memory(&app.session.id, &old);
+    app.interleave_images
+        .push(("image/png".into(), "interleaved-image".into()));
+    app.commit_local_interleave("new interleaved memory question");
+    assert_ne!(
+        app.session.model_usage_turn_id.as_deref(),
+        Some(old.as_str()),
+        "interleaved human input must supersede the old recall anchor"
+    );
+    assert!(!crate::memory::complete_turn_memory(
+        &app.session.id,
+        &old,
+        Some(native())
+    ));
+    let source = app.session.messages.last().unwrap();
+    assert!(request_text(&[source.to_message()]).contains("new interleaved memory question"));
+    assert!(
+        source
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. }))
+    );
+    assert!(app.interleave_images.is_empty());
+    let human_turn = app.session.model_usage_turn_id.clone();
+    app.pending_transfer_request = true;
+    app.commit_local_interleave(&super::super::commands::transfer_pause_message());
+    assert_eq!(app.session.model_usage_turn_id, human_turn);
+    assert_eq!(
+        app.session.messages.last().unwrap().display_role,
+        Some(crate::session::StoredDisplayRole::System)
+    );
+    assert!(!app.extraction_transcript().contains("Transfer requested"));
+}
+
+#[tokio::test]
+async fn local_memory_request_late_delivery_and_lifecycle_reject_stale_results() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let _env = HookEnv::new("");
+    for action in ["clear", "reset", "restore", "quit", "drop"] {
+        let mut app = app().await;
+        let turn = anchor(&mut app, "lifecycle memory question");
+        let sid = app.session.id.clone();
+        crate::memory::begin_turn_memory(&sid, &turn);
+        let (request, _) = app.prepare_local_memory_request(vec![]).await;
+        assert!(!request_text(&request).contains("native-local-canary"));
+        assert!(crate::memory::complete_turn_memory(
+            &sid,
+            &turn,
+            Some(native())
+        ));
+        let (request, _) = app
+            .prepare_local_memory_request(vec![Message::tool_result("id", "continuation", false)])
+            .await;
+        assert!(request_text(&request).contains("native-local-canary"));
+        match action {
+            "clear" => app.clear_provider_messages(),
+            "reset" => super::super::commands_review::reset_current_session(&mut app),
+            "restore" => {
+                let mut target = Session::create(None, None);
+                target.add_message(Role::User, Message::user("saved target session").content);
+                target.save().unwrap();
+                assert!(Session::load(&target.id).is_ok());
+                app.restore_session(&target.id);
+                assert_eq!(app.session.id, target.id);
+            }
+            "quit" => {
+                assert!(!app.handle_quit_request());
+                assert!(app.handle_quit_request());
+            }
+            "drop" => {
+                drop(app);
+                assert!(crate::memory::current_memory_turn(&sid).is_none());
+                continue;
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            crate::memory::current_memory_turn(&sid).is_none(),
+            "{action}"
+        );
+        assert!(
+            !crate::memory::complete_turn_memory(&sid, &turn, Some(native())),
+            "{action}"
+        );
+        assert!(app.local_turn_memory.is_none(), "{action}");
+    }
+}
+
+#[tokio::test]
+async fn local_memory_request_missing_anchor_and_remote_abstain() {
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let calls = home.root().join("unexpected-hook");
+    let _env = HookEnv::new(&format!("touch {}", calls.display()));
+    let mut app = app().await;
+    for turn in [None, Some("unrelated-session:missing-message".into())] {
+        app.session.model_usage_turn_id = turn;
+        let (request, _) = app
+            .prepare_local_memory_request(vec![Message::user("not a durable anchor")])
+            .await;
+        assert_eq!(request.len(), 1);
+        assert!(app.local_turn_memory.is_none());
+    }
+    let turn = anchor(&mut app, "remote memory question");
+    crate::memory::begin_turn_memory(&app.session.id, &turn);
+    crate::memory::complete_turn_memory(&app.session.id, &turn, Some(native()));
+    app.is_remote = true;
+    let (request, _) = app.prepare_local_memory_request(vec![]).await;
+    assert!(request.is_empty());
+    assert!(!calls.exists());
+    // A remote UI must not clear the daemon's binding for the same session.
+    assert_eq!(
+        crate::memory::current_memory_turn(&app.session.id).as_deref(),
+        Some(turn.as_str())
+    );
+    crate::memory::clear_pending_memory(&app.session.id);
+}

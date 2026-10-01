@@ -3733,6 +3733,22 @@ impl App {
         *call_output_tokens_seen = output_tokens;
     }
 
+    pub(super) fn commit_local_interleave(&mut self, content: &str) {
+        let message = Message::user_with_images(content, std::mem::take(&mut self.interleave_images));
+        self.add_provider_message(message.clone());
+        let synthetic = self.pending_transfer_request
+            && content == super::commands::transfer_pause_message();
+        let id = self.session.add_message_with_display_role(
+            Role::User,
+            message.content,
+            synthetic.then_some(crate::session::StoredDisplayRole::System),
+        );
+        if !synthetic {
+            self.begin_local_memory_turn(&id);
+        }
+        self.session_save_pending = true;
+    }
+
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     pub(super) fn submit_input(&mut self) {
         // Connected SSH input is dispatched through the wire client, never the
