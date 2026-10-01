@@ -26,6 +26,11 @@ mod activity;
 mod cache;
 #[path = "memory/pending.rs"]
 mod pending;
+mod turn_memory;
+pub use turn_memory::{
+    TurnMemoryResult, begin_turn_memory, clear_turn_memory, complete_turn_memory,
+    current_memory_turn, read_turn_memory,
+};
 #[path = "memory_prompt.rs"]
 mod prompt_support;
 
