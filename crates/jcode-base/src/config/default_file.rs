@@ -564,16 +564,22 @@ swarm_max_concurrent_agents = 32
 # (quotes work) but executed directly, with JCODE_HOOK_* env vars describing
 # the event:
 #   JCODE_HOOK_EVENT       - "turn_start", "turn_end", "session_start",
-#                            "session_end", "pre_tool", "post_tool"
+#                            "session_end", "pre_tool", "post_tool", "turn_context"
 #   JCODE_HOOK_SESSION_ID  - the session the event belongs to
 #   JCODE_HOOK_CWD         - session working directory (also the hook's cwd)
 #   JCODE_HOOK_PAYLOAD     - JSON mirror of all fields
 # Hook processes get JCODE_HOOKS_DISABLED=1 so nested jcode calls don't recurse.
 #
-# All hooks except pre_tool are observers: detached, fire-and-forget, failures
+# All hooks except pre_tool and turn_context are observers: detached, fire-and-forget, failures
 # only logged. Env overrides: JCODE_HOOK_TURN_START, JCODE_HOOK_TURN_END,
 # JCODE_HOOK_SESSION_START, JCODE_HOOK_SESSION_END, JCODE_HOOK_PRE_TOOL,
-# JCODE_HOOK_POST_TOOL (set empty to disable a config hook).
+# JCODE_HOOK_POST_TOOL, JCODE_HOOK_TURN_CONTEXT (set empty to disable a config hook).
+#
+# Optional external memory protocol: JSON request on stdin, attributed JSON
+# response on stdout. At most four commands run in parallel with a shared
+# 1500ms deadline. Missing/broken hooks supply no context and do not block tools.
+# See docs/HOOKS.md for identity checks, payload bounds and consumer coverage.
+# turn_context = "~/bin/jcode-memory-recall"
 #
 # Runs when an agent turn begins, before the model starts generating and before
 # the first pre_tool. Lets integrations detect the agent is working during the

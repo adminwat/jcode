@@ -8,7 +8,7 @@
 //! directly (no shell), with `JCODE_HOOK_*` metadata env vars describing the
 //! event.
 //!
-//! Two dispatch styles:
+//! Three dispatch styles:
 //!
 //! - **Observers** (`turn_start`, `turn_end`, `session_start`, `session_end`,
 //!   `post_tool`): spawned detached, fire-and-forget. Failures are logged and
@@ -17,11 +17,16 @@
 //!   exit. Exit 0 allows the tool call, exit 2 blocks it and the hook's
 //!   stderr is fed back to the model as the tool error. Any other outcome
 //!   (other exit codes, timeout, spawn failure) fails open with a warning.
+//! - **Context** (`turn_context`): bounded request/response commands returning
+//!   attributed historical evidence for an exact session and logical turn.
 //!
 //! Hook processes get `JCODE_HOOKS_DISABLED=1` in their environment so a
 //! hook that itself invokes jcode does not recursively trigger hooks.
 
 use std::path::PathBuf;
+
+mod turn_context;
+pub use turn_context::{RetrievedMemory, run_turn_context};
 
 tokio::task_local! {
     /// Terminal identity for the client whose request is currently executing.
@@ -102,6 +107,7 @@ pub fn hook_commands(event: &str) -> Vec<String> {
     let hooks = &crate::config::config().hooks;
     let raw = match event {
         "turn_start" => hooks.turn_start.as_ref(),
+        "turn_context" => hooks.turn_context.as_ref(),
         "turn_end" => hooks.turn_end.as_ref(),
         "session_start" => hooks.session_start.as_ref(),
         "session_end" => hooks.session_end.as_ref(),

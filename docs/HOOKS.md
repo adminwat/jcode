@@ -10,6 +10,8 @@ sessions appear*); lifecycle hooks tell you *what is happening inside them*.
 ```toml
 # ~/.jcode/config.toml
 [hooks]
+turn_start    = ""                            # observer
+turn_context  = ""                            # bounded context response
 turn_end      = "~/bin/jcode-turn-notify"     # observer
 session_start = ""                            # observer
 session_end   = ""                            # observer
@@ -19,7 +21,7 @@ pre_tool_timeout_ms = 5000
 ```
 
 Env overrides (always win; empty value disables a config hook):
-`JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
+`JCODE_HOOK_TURN_START`, `JCODE_HOOK_TURN_CONTEXT`, `JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
 `JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`.
 
 ## Common contract
@@ -32,7 +34,7 @@ Env overrides (always win; empty value disables a config hook):
 
 | Variable | Meaning |
 | --- | --- |
-| `JCODE_HOOK_EVENT` | `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool` |
+| `JCODE_HOOK_EVENT` | `turn_start`, `turn_context`, `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool` |
 | `JCODE_HOOK_SESSION_ID` | Session the event belongs to |
 | `JCODE_HOOK_CWD` | Session working directory |
 | `JCODE_HOOK_PAYLOAD` | JSON object mirroring all fields (capped at 16 KB) |
@@ -40,7 +42,7 @@ Env overrides (always win; empty value disables a config hook):
 
 ## Observer hooks
 
-`turn_end`, `session_start`, `session_end`, and `post_tool` are
+`turn_start`, `turn_end`, `session_start`, `session_end`, and `post_tool` are
 **observers**: spawned detached, fire-and-forget. They can never block or slow
 the agent; failures are only logged.
 
@@ -65,6 +67,50 @@ attached), or `resume` (restored by id). `session_end` fires on normal close
 Fires after every tool call. Extra fields: `JCODE_HOOK_TOOL_NAME`,
 `JCODE_HOOK_STATUS`, `JCODE_HOOK_DURATION_MS`, `JCODE_HOOK_OUTPUT_BYTES` (on
 success), `JCODE_HOOK_ERROR` (on failure).
+
+## Context response hook: `turn_context`
+
+This protocol is opt-in and distinct from detached observers. The transport is
+available through `hooks::run_turn_context`; provider-loop integration is a
+separate consumer and is not implied merely by configuring a command.
+
+A scalar command or array of up to four commands is supported. Commands run in
+parallel within one **1500ms deadline**, including stdin writes, stdout reads,
+and exit. Timeout, cancellation, or protocol errors discard that command's
+context without failing the user turn. On Unix the dedicated hook process group
+is killed on completion or cancellation, including descendants. Direct children
+also use Tokio's kill-on-drop/reaping. No store or model is invoked by default.
+
+The complete UTF-8 JSON request is sent on **stdin**, not in an environment variable:
+
+```json
+{"version":1,"event":"turn_context","session_id":"full-session-id","turn_id":"logical-turn-id","cwd":"/project","query":"actual user query"}
+```
+
+`cwd` may be null. `JCODE_HOOK_TURN_ID` is also provided, alongside the common
+metadata and recursion guard. `JCODE_HOOK_PAYLOAD` contains metadata only, not
+the query. Requests over 64 KiB, blank identity/query, and configurations over
+four commands are rejected, never silently truncated.
+
+Exit zero and return exactly one JSON object on **stdout**:
+
+```json
+{"version":1,"session_id":"full-session-id","turn_id":"logical-turn-id","memories":[{"source":"claude-mem","id":"observation-123","text":"Historical evidence with attribution."}]}
+```
+
+Both identities must match the request exactly. Unknown/missing fields, invalid
+JSON, nonzero exit, or stdout exceeding 16 KiB reject the entire response. An
+empty `memories` array is a valid abstention, but `OK`, `{}`, or an HTTP success
+alone are not. Each record requires nonblank `source` (at most 128 bytes), `id`
+(1024 bytes), and `text` (8192 bytes), with at most 32 records per response.
+The combined serialized record arrays are bounded to 16 KiB in configuration
+order. Contributions exceeding the remaining budget are rejected and logged,
+not cut mid-evidence. Identical records are deduplicated. Diagnostic logs contain
+status, record count and latency, not queries or returned evidence.
+
+Store output is historical, untrusted evidence, not instructions or proof of
+current state. Consumers must preserve provenance, bind replay to this logical
+turn, and keep retrieval out of persisted conversation history.
 
 ## Gate hook: `pre_tool`
 

@@ -870,6 +870,11 @@ pub struct HooksConfig {
     /// it is only thinking/streaming text. Fields: MODEL, SOURCE
     /// ("chat"/"resume"/"ambient"). Env override: JCODE_HOOK_TURN_START.
     pub turn_start: Option<HookCommands>,
+    /// Bounded context retrieval protocol, with JSON request on stdin and an
+    /// attributed, session/turn-bound JSON response on stdout. Default: off.
+    /// Up to four parallel commands, with a shared 1500ms deadline.
+    /// Env override: JCODE_HOOK_TURN_CONTEXT.
+    pub turn_context: Option<HookCommands>,
     /// Runs when an agent turn completes.
     /// Fields: STATUS ("ok"/"error"), DURATION_MS, MODEL, LAST_ASSISTANT_TEXT.
     /// Env override: JCODE_HOOK_TURN_END.
@@ -899,6 +904,7 @@ impl Default for HooksConfig {
     fn default() -> Self {
         Self {
             turn_start: None,
+            turn_context: None,
             turn_end: None,
             session_start: None,
             session_end: None,
