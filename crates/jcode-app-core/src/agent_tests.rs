@@ -1542,6 +1542,131 @@ impl Drop for ExternalHookTestEnv {
     }
 }
 
+// Explicit cross-repository acceptance: no copied JSON producer and no model calls.
+#[tokio::test]
+#[ignore = "requires JCODE_MEMORY_READER_SCRIPT pointing to the actual companion CLI"]
+async fn companion_memory_reader_reaches_actual_provider_loops() {
+    let reader =
+        std::env::var("JCODE_MEMORY_READER_SCRIPT").expect("companion reader path required");
+    assert!(std::path::Path::new(&reader).is_file());
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let db = home.root().join("source.db");
+    let log = home.root().join("reader.jsonl");
+    let setup = std::process::Command::new("python3")
+        .args([
+            "-c",
+            r#"import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.executescript('''
+CREATE TABLE observations (id INTEGER PRIMARY KEY, memory_session_id TEXT, project TEXT,
+title TEXT, subtitle TEXT, facts TEXT, narrative TEXT, text TEXT, concepts TEXT,
+type TEXT, created_at TEXT, generated_by_model TEXT);
+CREATE VIRTUAL TABLE observations_fts USING fts5(title, subtitle, narrative, text, facts, concepts,
+content='observations', content_rowid='id');
+INSERT INTO observations VALUES (42,'original-source-session','jcode','Memory retrieval evidence',
+'','[]','companion-source-canary: the operator did not approve a daemon reload.','','[]',
+'correction','2026-10-01T00:00:00Z','fixture');
+INSERT INTO observations_fts(rowid,title,narrative) SELECT id,title,narrative FROM observations;
+''')
+"#,
+        ])
+        .arg(&db)
+        .output()
+        .unwrap();
+    assert!(
+        setup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    let wrapper = home.root().join("run-companion.py");
+    std::fs::write(&wrapper, format!(
+        "import os,sys\nos.environ['JCODE_MEMORY_CONTEXT_DB']={}\nos.environ['JCODE_MEMORY_CONTEXT_LOG']={}\nos.execv(sys.executable,[sys.executable,{},'claude-mem'])\n",
+        serde_json::to_string(&db).unwrap(), serde_json::to_string(&log).unwrap(),
+        serde_json::to_string(&reader).unwrap(),
+    )).unwrap();
+    let _env = ExternalHookTestEnv::new(&format!("python3 '{}'", wrapper.display()));
+    for streaming in [false, true] {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(MemoryReplayProvider {
+            requests: requests.clone(),
+            late_session: None,
+        });
+        let registry = Registry::new(provider.clone()).await;
+        registry
+            .register(
+                "memory_fixture".into(),
+                Arc::new(FakeMcpTool {
+                    name: "memory_fixture".into(),
+                }),
+            )
+            .await;
+        let mut agent = Agent::new(provider, registry);
+        agent.memory_enabled = true;
+        agent.system_prompt_override = Some("isolated companion integration".into());
+        for (index, query) in ["memory retrieval", "unrelated plumbing"]
+            .into_iter()
+            .enumerate()
+        {
+            let id = agent.add_message(Role::User, Message::user(query).content);
+            agent.begin_model_usage_turn(&id);
+            let turn = agent.model_usage_turn_id();
+            crate::memory::begin_turn_memory(&agent.session.id, &turn);
+            crate::memory::complete_turn_memory(&agent.session.id, &turn, None);
+            let before = requests.lock().unwrap().len();
+            if streaming {
+                let (tx, _rx) = tokio_mpsc::unbounded_channel();
+                agent.run_turn_streaming_mpsc(tx).await.unwrap();
+            } else {
+                agent.run_turn(false).await.unwrap();
+            }
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len() - before, if index == 0 { 3 } else { 1 });
+            for request in &captured[before..] {
+                let evidence: Vec<_> = request
+                    .iter()
+                    .map(message_text)
+                    .filter(|t| t.contains("companion-source-canary"))
+                    .collect();
+                assert_eq!(
+                    evidence.len(),
+                    usize::from(index == 0),
+                    "streaming={streaming} query={query}"
+                );
+                if index == 0 {
+                    for source in [
+                        "claude-mem",
+                        "original-source-session",
+                        "did not approve a daemon reload",
+                    ] {
+                        assert!(
+                            evidence[0].contains(source),
+                            "missing source attribution: {source}"
+                        );
+                    }
+                }
+            }
+            assert!(
+                !agent
+                    .session
+                    .messages
+                    .iter()
+                    .any(|m| content_text(&m.content).contains("companion-source-canary"))
+            );
+        }
+    }
+    let reads: Vec<serde_json::Value> = std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        reads.len(),
+        4,
+        "query once per human turn, not each tool continuation"
+    );
+    assert_eq!(reads.iter().filter(|r| r["status"] == "ok").count(), 2);
+}
+
 #[tokio::test]
 async fn external_memory_reaches_provider_loops_without_cross_turn_leaks() {
     let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
@@ -3005,7 +3130,10 @@ async fn actual_agent_completed_turn_cadence_with_disabled_recall_and_owning_rou
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider.clone(), registry);
     agent.set_memory_enabled(false);
-    assert!(!agent.memory_enabled, "recall must be disabled in this test");
+    assert!(
+        !agent.memory_enabled,
+        "recall must be disabled in this test"
+    );
 
     // Add a rich tool result so transcript is >= 200 chars
     let tool_output_text = "Database migration completed and verified in isolated test environment. All 42 tables present with expected schema version 20261001.";
@@ -3091,7 +3219,11 @@ async fn actual_agent_completed_turn_cadence_with_disabled_recall_and_owning_rou
         .with_skills(false)
         .with_project_dir(agent.working_dir().unwrap());
     let entries = manager.list_all().unwrap();
-    assert_eq!(entries.len(), 1, "extracted memory must be persisted in storage");
+    assert_eq!(
+        entries.len(),
+        1,
+        "extracted memory must be persisted in storage"
+    );
     assert_eq!(
         entries[0].content,
         format!("Tool reported: {}", tool_output_text),
