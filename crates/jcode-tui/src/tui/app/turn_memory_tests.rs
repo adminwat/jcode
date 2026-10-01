@@ -332,7 +332,14 @@ impl Provider for RetentionProvider {
         _: Option<&str>,
     ) -> Result<crate::provider::EventStream> {
         use crate::message::StreamEvent;
-        if request_text(messages).contains("retention-error-fixture") {
+        if messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| request_text(&[m.clone()]))
+            .unwrap_or_default()
+            .contains("retention-error-fixture")
+        {
             anyhow::bail!("local-retention-error-canary");
         }
         let first = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
@@ -683,5 +690,92 @@ os.close(fd)
             );
         }
         app.is_processing = false;
+    }
+
+    // Interleave behavior: an in-flight turn interrupted by human input emits
+    // an 'interrupted' event for the old anchor, and establishes a new distinct anchor.
+    let old_turn_id = app.session.model_usage_turn_id.clone().unwrap();
+    let events_before_interleave = std::fs::read_to_string(&calls)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    let interleave_prompt = "interleaved human requirement must stay distinct";
+    app.commit_local_interleave(interleave_prompt);
+    let new_turn_id = app.session.model_usage_turn_id.clone().unwrap();
+    assert_ne!(
+        old_turn_id, new_turn_id,
+        "interleaved human input must create a distinct anchor"
+    );
+
+    // Complete the new turn interactively through the terminal loop
+    let interleave_result = app
+        .run_turn_interactive(&mut terminal, &mut input, None)
+        .await;
+    assert!(interleave_result.is_ok(), "{interleave_result:?}");
+    app.is_processing = false;
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let interleave_events = loop {
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        if rows.len() >= events_before_interleave + 2 {
+            break rows;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing interleave turn_end events, found {}",
+            rows.len()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    let interrupted_event = &interleave_events[events_before_interleave];
+    assert_eq!(interrupted_event["status"], "interrupted");
+    assert_eq!(interrupted_event["turn_id"], old_turn_id);
+    let interrupted_records: serde_json::Value =
+        serde_json::from_str(interrupted_event["turn_records_json"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        interrupted_records["records"][0]["text"],
+        "retention-error-fixture"
+    );
+
+    let completed_event = &interleave_events[events_before_interleave + 1];
+    assert_eq!(completed_event["status"], "ok");
+    assert_eq!(completed_event["turn_id"], new_turn_id);
+    let completed_records: serde_json::Value =
+        serde_json::from_str(completed_event["turn_records_json"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        completed_records["records"][0]["text"],
+        interleave_prompt
+    );
+
+    // Remote App must not emit duplicate local turn_end events
+    app.is_remote = true;
+    app.input = "remote turn must not duplicate local turn_end".into();
+    app.submit_input();
+    let remote_result = app
+        .run_turn_interactive(&mut terminal, &mut input, None)
+        .await;
+    assert!(remote_result.is_ok(), "{remote_result:?}");
+    app.is_processing = false;
+
+    // Observer hooks are detached. Observe the full existing hook wait window
+    // rather than checking before a wrongly emitted child could write its row.
+    let remote_deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < remote_deadline {
+        let final_rows: Vec<serde_json::Value> = std::fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(
+            final_rows.len(),
+            interleave_events.len(),
+            "remote App must not emit duplicate local turn_end events"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
