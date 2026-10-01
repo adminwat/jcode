@@ -223,6 +223,8 @@ impl App {
     }
 
     pub(super) fn clear_provider_messages(&mut self) {
+        self.clear_local_memory();
+        self.session.model_usage_turn_id = None;
         self.messages.clear();
         self.last_injected_memory_signature = None;
         self.reset_tool_output_tracking();
@@ -499,7 +501,7 @@ impl App {
     pub(super) fn set_memory_feature_enabled(&mut self, enabled: bool) {
         self.memory_enabled = enabled;
         if !enabled {
-            crate::memory::clear_pending_memory(&self.session.id);
+            self.clear_local_memory();
             crate::memory::clear_activity();
             crate::memory_agent::reset();
             self.last_injected_memory_signature = None;
@@ -632,6 +634,7 @@ impl App {
                 &self.provider.model(),
                 crate::telemetry::SessionEndReason::NormalExit,
             );
+            self.clear_local_memory();
             self.session.mark_closed();
             let _ = self.session.save();
             self.should_quit = true;

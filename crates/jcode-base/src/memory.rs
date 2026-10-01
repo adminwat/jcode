@@ -27,6 +27,8 @@ mod cache;
 #[path = "memory/pending.rs"]
 mod pending;
 mod turn_memory;
+mod request_memory;
+pub use request_memory::{ExternalTurnMemory, prepare_external_turn_memory, await_turn_memory};
 pub use turn_memory::{
     TurnMemoryResult, begin_turn_memory, clear_turn_memory, complete_turn_memory,
     current_memory_turn, read_turn_memory,

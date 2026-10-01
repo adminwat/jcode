@@ -76,38 +76,20 @@ impl App {
             }
 
             let tools = self.registry.definitions(None).await;
-            // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_pending = self.build_memory_prompt_nonblocking(&provider_messages);
-            // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt =
-                self.build_system_prompt_split(memory_pending.as_ref().map(|p| p.prompt.as_str()));
+            let (request_messages, split_prompt) =
+                self.prepare_local_memory_request(provider_messages).await;
             self.context_info.tool_defs_count = tools.len();
             self.context_info.tool_defs_chars = ToolDefinition::aggregate_prompt_chars(&tools);
-            if let Some(pending) = &memory_pending {
-                let age_ms = pending.computed_at.elapsed().as_millis() as u64;
-                self.show_injected_memory_context(
-                    &pending.prompt,
-                    pending.display_prompt.as_deref(),
-                    pending.count,
-                    age_ms,
-                    pending.memory_ids.clone(),
-                );
-            }
 
             crate::logging::info(&format!(
                 "TUI: API call starting ({} messages)",
-                provider_messages.len()
+                request_messages.len()
             ));
             let api_start = std::time::Instant::now();
 
             // Clone data needed for the API call to avoid borrow issues
             // The future would hold references across the select! which conflicts with handle_key
             let provider = self.provider.clone();
-            let request_messages = if crate::config::config().features.message_timestamps {
-                Message::with_timestamps(&provider_messages)
-            } else {
-                provider_messages
-            };
             let session_id_clone = self.provider_session_id.clone();
             let static_part = split_prompt.static_part.clone();
             let dynamic_part = split_prompt.dynamic_part.clone();

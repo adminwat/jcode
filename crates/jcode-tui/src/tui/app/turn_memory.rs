@@ -1,6 +1,32 @@
 use super::*;
 
+/// Own the local session binding so close/drop also rejects late retrievals.
+pub(super) struct LocalTurnMemory {
+    session_id: String,
+    external: Option<crate::memory::ExternalTurnMemory>,
+}
+
+impl Drop for LocalTurnMemory {
+    fn drop(&mut self) {
+        crate::memory::clear_pending_memory(&self.session_id);
+    }
+}
+
 impl App {
+    pub(super) fn clear_local_memory(&mut self) {
+        self.local_turn_memory = None;
+        if !self.is_remote {
+            crate::memory::clear_pending_memory(&self.session.id);
+        }
+        self.last_injected_memory_signature = None;
+    }
+
+    /// Only durable human input begins a turn, never tool results or reminders.
+    pub(super) fn begin_local_memory_turn(&mut self, message_id: &str) {
+        self.clear_local_memory();
+        self.session.model_usage_turn_id = Some(format!("{}:{message_id}", self.session.id));
+    }
+
     /// Build split system prompt for better caching
     pub(super) fn build_system_prompt_split(
         &mut self,
@@ -97,44 +123,92 @@ impl App {
         self.set_status_notice(notice);
     }
 
-    /// Get memory prompt using async non-blocking approach
-    /// Takes any pending memory from background check and sends context to memory agent for next turn
-    pub(in crate::tui::app) fn build_memory_prompt_nonblocking(
-        &self,
-        messages: &[Message],
-    ) -> Option<crate::memory::PendingMemory> {
-        if self.is_remote || !self.memory_enabled {
-            return None;
-        }
-
-        // Take pending memory if available (computed in background during last turn)
-        let fresh_user_turn = crate::message::ends_with_fresh_user_turn(messages);
-        let pending = if fresh_user_turn {
-            crate::memory::take_pending_memory(&self.session.id)
+    /// Assemble the ephemeral request separately from the durable source transcript.
+    pub(super) async fn prepare_local_memory_request(
+        &mut self,
+        messages: Vec<Message>,
+    ) -> (Vec<Message>, crate::prompt::SplitSystemPrompt) {
+        let split = self.build_system_prompt_split(None);
+        let mut messages = if crate::config::config().features.message_timestamps {
+            Message::with_timestamps(&messages)
         } else {
-            None
+            messages
         };
-
-        // Send context to memory agent for the NEXT turn (doesn't block current send)
-        // Relevance results are consumed only at the start of a fresh user turn.
-        // Tool continuations do not provide another injection opportunity, so
-        // avoid re-running the local embedding model after every tool result.
-        if fresh_user_turn {
-            let shared_messages: std::sync::Arc<[crate::message::Message]> =
-                messages.to_vec().into();
-            crate::memory_agent::update_context_sync_with_dir(
-                &self.session.id,
-                shared_messages,
-                self.session.working_dir.clone(),
-            );
+        let turn_id = self.session.model_usage_turn_id.clone().filter(|turn_id| {
+            self.session
+                .visible_conversation_messages()
+                .iter()
+                .any(|message| {
+                    message.role == Role::User
+                        && format!("{}:{}", self.session.id, message.id) == *turn_id
+                })
+        });
+        if self.is_remote || !self.memory_enabled || turn_id.is_none() {
+            self.clear_local_memory();
+            return (messages, split);
         }
-
-        // Return pending memory from previous turn
-        pending
+        if self
+            .local_turn_memory
+            .as_ref()
+            .is_some_and(|state| state.session_id != self.session.id)
+        {
+            self.local_turn_memory = None;
+        }
+        let state = self
+            .local_turn_memory
+            .get_or_insert_with(|| LocalTurnMemory {
+                session_id: self.session.id.clone(),
+                external: None,
+            });
+        // Read the original transcript, not a compacted summary or a tool-result tail.
+        let raw: std::sync::Arc<[Message]> = self
+            .session
+            .visible_conversation_messages()
+            .into_iter()
+            .map(|m| m.to_message())
+            .collect::<Vec<_>>()
+            .into();
+        let (native, external) = tokio::join!(
+            crate::memory::await_turn_memory(
+                &self.session.id,
+                turn_id.as_deref().unwrap(),
+                raw,
+                self.session.working_dir.clone()
+            ),
+            crate::memory::prepare_external_turn_memory(&mut state.external, &self.session, true),
+        );
+        if let Some(pending) = native.memory {
+            if native.first_delivery {
+                self.show_injected_memory_context(
+                    &pending.prompt,
+                    pending.display_prompt.as_deref(),
+                    pending.count,
+                    pending.computed_at.elapsed().as_millis() as u64,
+                    pending.memory_ids,
+                );
+            }
+            let text = format!("<system-reminder>\n{}\n</system-reminder>", pending.prompt);
+            if !messages.iter().any(|m| {
+                m.role == Role::User
+                    && matches!(m.content.as_slice(),
+                [ContentBlock::Text { text: existing, .. }] if existing == &text)
+            }) {
+                messages.push(Message::user(&text));
+            }
+        }
+        if let Some((message, _, _)) = external {
+            messages.push(message);
+        }
+        (messages, split)
     }
 
     pub(super) fn extraction_transcript(&self) -> String {
-        let messages: Vec<_> = self.session.messages.iter().map(|m| m.to_message()).collect();
+        let messages: Vec<_> = self
+            .session
+            .messages
+            .iter()
+            .map(|m| m.to_message())
+            .collect();
         crate::memory_agent::build_transcript_for_extraction(&messages)
     }
 
@@ -148,6 +222,11 @@ impl App {
             &self.session.id,
             self.session.working_dir.as_deref(),
             Some(self.provider.fork()),
-        ).await;
+        )
+        .await;
     }
 }
+
+#[cfg(test)]
+#[path = "turn_memory_tests.rs"]
+mod tests;

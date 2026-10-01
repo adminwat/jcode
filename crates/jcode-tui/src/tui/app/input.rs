@@ -3938,7 +3938,7 @@ impl App {
                     .join(", ")
             ));
         }
-        if images.is_empty() {
+        let message_id = if images.is_empty() {
             self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
             self.add_provider_message(Message::user(&input));
             self.session.add_message(
@@ -3947,7 +3947,7 @@ impl App {
                     text: input.clone(),
                     cache_control: None,
                 }],
-            );
+            )
         } else {
             self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
             self.add_provider_message(Message::user_with_images(&input, images.clone()));
@@ -3959,8 +3959,9 @@ impl App {
                 text: input.clone(),
                 cache_control: None,
             });
-            self.session.add_message(Role::User, blocks);
-        }
+            self.session.add_message(Role::User, blocks)
+        };
+        self.begin_local_memory_turn(&message_id);
         crate::telemetry::record_turn();
         self.session_save_pending = true;
 
@@ -4035,13 +4036,16 @@ impl App {
 
             if has_combined {
                 self.add_provider_message(Message::user(&combined));
-                self.session.add_message(
+                let message_id = self.session.add_message(
                     Role::User,
                     vec![ContentBlock::Text {
                         text: combined.clone(),
                         cache_control: None,
                     }],
                 );
+                if !preserve_visible_turn {
+                    self.begin_local_memory_turn(&message_id);
+                }
             }
             self.session_save_pending = true;
             self.clear_streaming_render_state();
