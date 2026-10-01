@@ -163,7 +163,14 @@ async fn run_final_extraction(transcript: String, session_id: String, working_di
         transcript.len()
     ));
 
-    let sidecar = crate::sidecar::Sidecar::new();
+    let sidecar = match crate::sidecar::Sidecar::for_extraction() {
+        Ok(Some(sidecar)) => sidecar,
+        Ok(None) => return,
+        Err(e) => {
+            crate::logging::warn(&format!("Final extraction unavailable: {e}"));
+            return;
+        }
+    };
     let manager = manager_for_working_dir(working_dir.as_deref());
 
     let existing: Vec<String> = manager
@@ -417,6 +424,8 @@ struct SessionState {
     turn_count: usize,
     /// Turn count since last extraction for this session
     turns_since_extraction: usize,
+    /// Last logical turn counted for extraction (legacy callers use a context hash).
+    last_extraction_turn: Option<String>,
     /// `turn_count` at which the Mode-2 listwise rerank last ran, for the
     /// cadence floor (rerank at most once per `memory_rerank_cadence` turns).
     last_rerank_turn: Option<usize>,
@@ -558,6 +567,27 @@ impl MemoryAgent {
         messages: Arc<[crate::message::Message]>,
         _timestamp: Instant,
     ) -> Result<()> {
+        // Retention is independent of recall. Empty relevance text, an unavailable
+        // judge, or failed embeddings must not prevent grounded evidence capture.
+        let extraction_context = memory::format_context_for_extraction(&messages);
+        if !extraction_context.is_empty() {
+            let key = match turn_id {
+                Some(id) => format!("turn:{id}"),
+                None => format!("context:{}", relevance_context_signature(&extraction_context)),
+            };
+            let ss = self.session_state(session_id);
+            if ss.last_extraction_turn.as_deref() != Some(key.as_str()) {
+                ss.last_extraction_turn = Some(key);
+                ss.turns_since_extraction += 1;
+            }
+            if ss.turns_since_extraction >= PERIODIC_EXTRACTION_INTERVAL
+                && extraction_context.len() >= 200
+            {
+                ss.turns_since_extraction = 0;
+                self.extract_from_context(session_id, &extraction_context, "periodic")
+                    .await;
+            }
+        }
         let memory_manager = self.manager_for_session(session_id);
         let context = memory::format_context_for_relevance(&messages);
         if context.is_empty() {
@@ -616,8 +646,6 @@ impl MemoryAgent {
             ss.last_relevance_context_signature = Some(context_signature);
             ss.last_relevance_check_at = Some(Instant::now());
         }
-
-        self.session_state(session_id).turns_since_extraction += 1;
 
         memory::set_state(MemoryState::Embedding);
         memory::add_event(MemoryEventKind::EmbeddingStarted);
@@ -708,7 +736,7 @@ impl MemoryAgent {
         {
             let ss = self.session_state(session_id);
             ss.last_context_embedding = Some(context_embedding.clone());
-            ss.last_context_string = Some(memory::format_context_for_extraction(&messages));
+            ss.last_context_string = Some(extraction_context);
         }
 
         // Hybrid retrieval must use the same representation for both halves of
@@ -746,26 +774,6 @@ impl MemoryAgent {
                 }
             }
         };
-
-        // Periodic extraction: even without topic change, extract every N turns
-        {
-            let ss = self.session_state(session_id);
-            if ss.turns_since_extraction >= PERIODIC_EXTRACTION_INTERVAL {
-                let extraction_ctx = memory::format_context_for_extraction(&messages);
-                if extraction_ctx.len() >= 200 {
-                    crate::logging::info(&format!(
-                        "[{}] Triggering periodic extraction ({} turns since last, {} chars context)",
-                        session_id,
-                        ss.turns_since_extraction,
-                        extraction_ctx.len()
-                    ));
-                    ss.turns_since_extraction = 0;
-                    let _ = ss;
-                    self.extract_from_context(session_id, &extraction_ctx, "periodic")
-                        .await;
-                }
-            }
-        }
 
         // Step 2: Find candidate memories via hybrid retrieval (dense + BM25
         // fused with RRF). Benchmarking showed the old dense-only path with a
@@ -1055,15 +1063,14 @@ impl MemoryAgent {
     /// This is an incremental extraction - we extract from a portion of the
     /// conversation (on topic change or periodically) rather than waiting for session end.
     async fn extract_from_context(&self, session_id: &str, context: &str, reason: &str) {
-        // Memory extraction requires the LLM. Skip when sidecar mode is off OR
-        // (sidecar mode on but) no LLM backend is reachable. Re-checked live so a
-        // login change is reflected without a restart.
-        let Some(sidecar) = self.live_sidecar() else {
-            crate::logging::info(&format!(
-                "Incremental extraction skipped for session {}: LLM judge unavailable",
-                session_id
-            ));
-            return;
+        let sidecar = match crate::sidecar::Sidecar::for_extraction() {
+            Ok(Some(sidecar)) => sidecar,
+            Ok(None) => return,
+            Err(e) => {
+                crate::logging::warn(&format!("Incremental extraction unavailable: {e}"));
+                memory::add_event(MemoryEventKind::Error { message: e.to_string() });
+                return;
+            }
         };
 
         // Don't extract from very short contexts
@@ -1083,29 +1090,16 @@ impl MemoryAgent {
         let context_owned = context.to_string();
         let session_id_owned = session_id.to_string();
 
-        let existing: Vec<String> = {
-            let start = context_owned
-                .char_indices()
-                .rev()
-                .nth(1_999)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let context_summary = &context_owned[start..];
-            match memory_manager.find_similar(context_summary, 0.25, 80) {
-                Ok(similar) if !similar.is_empty() => similar
-                    .into_iter()
-                    .map(|(entry, _score)| entry.content)
-                    .collect(),
-                _ => memory_manager
-                    .list_all()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|e| e.active)
-                    .take(40)
-                    .map(|e| e.content)
-                    .collect(),
-            }
-        };
+        // Do not run semantic retrieval here: extraction must still work when
+        // embeddings are unavailable. Storage handles replay idempotently.
+        let existing: Vec<String> = memory_manager
+            .list_all()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.active)
+            .take(40)
+            .map(|e| e.content)
+            .collect();
 
         // Run extraction in background - don't block the main flow
         tokio::spawn(async move {

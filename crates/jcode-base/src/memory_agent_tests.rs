@@ -1,6 +1,137 @@
 use super::*;
 use crate::memory::MemoryCategory;
 
+struct ExtractionProvider {
+    model: std::sync::Mutex<String>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    reply: String,
+}
+
+#[async_trait::async_trait]
+impl crate::provider::Provider for ExtractionProvider {
+    async fn complete(
+        &self,
+        _messages: &[crate::message::Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        assert_eq!(self.model(), "test-profile:extractor");
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let reply = self.reply.clone();
+        Ok(Box::pin(futures::stream::once(async move {
+            Ok(jcode_message_types::StreamEvent::TextDelta(reply))
+        })))
+    }
+    fn name(&self) -> &str { "extraction-test" }
+    fn model(&self) -> String { self.model.lock().unwrap().clone() }
+    fn set_model(&self, model: &str) -> Result<()> {
+        anyhow::ensure!(model == "test-profile:extractor", "unknown route");
+        *self.model.lock().unwrap() = model.into();
+        Ok(())
+    }
+    fn fork(&self) -> Arc<dyn crate::provider::Provider> {
+        Arc::new(Self {
+            model: std::sync::Mutex::new(self.model()),
+            calls: self.calls.clone(),
+            reply: self.reply.clone(),
+        })
+    }
+}
+
+#[test]
+fn extraction_persists_without_relevance_and_replays_idempotently() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let old = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let config = temp.path().join("config.toml");
+    std::fs::write(&config, "[agents]\nmemory_sidecar_enabled = false\nmemory_extraction_enabled = true\nmemory_extraction_model = 'test-profile:extractor'\n").unwrap();
+    crate::config::invalidate_config_cache();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let messages: Arc<[_]> = vec![crate::message::Message::tool_result(
+            "check", "Verified the temporary test database is reachable and its schema matches the expected migration version.", false,
+        )].into();
+        let transcript = memory::format_context_for_extraction(&messages);
+        let evidence: serde_json::Value = serde_json::from_str(transcript.lines().next().unwrap()).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _provider = crate::provider::TestActiveProvider::install(Arc::new(ExtractionProvider {
+            model: std::sync::Mutex::new("coordinator".into()),
+            calls: calls.clone(),
+            reply: serde_json::json!({"category":"fact", "evidence_id":evidence["id"], "quote":evidence["text"]}).to_string(),
+        }));
+        let (_, rx) = mpsc::channel(1);
+        let mut agent = MemoryAgent::new(rx);
+        let manager = MemoryManager::new().with_skills(false);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            assert!(!memory::memory_llm_judge_available(), "the relevance judge must be disabled in this test");
+            assert!(memory::format_context_for_relevance(&messages).is_empty());
+            for turn in 0..PERIODIC_EXTRACTION_INTERVAL {
+                for _ in 0..3 {
+                    agent.process_context("extraction-session-with-full-identity", Some(&turn.to_string()), messages.clone(), Instant::now()).await.unwrap();
+                }
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while manager.list_all().unwrap().is_empty() { tokio::task::yield_now().await; }
+            }).await.expect("periodic extraction must persist without relevance or embeddings");
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "continuations must not reschedule");
+            let entries = manager.list_all().unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].content, format!("Tool reported: {}", evidence["text"].as_str().unwrap()));
+            let before = serde_json::to_value(&entries).unwrap();
+            run_final_extraction(transcript.clone(), "extraction-session-with-full-identity".into(), None).await;
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(serde_json::to_value(manager.list_all().unwrap()).unwrap(), before);
+            std::fs::write(&config, "[agents]\nmemory_extraction_enabled = false\n").unwrap();
+            crate::config::invalidate_config_cache();
+            run_final_extraction(transcript, "disabled-session".into(), None).await;
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "opt-out must avoid provider calls");
+        });
+    }));
+    match old { Some(value) => crate::env::set_var("JCODE_HOME", value), None => crate::env::remove_var("JCODE_HOME") }
+    crate::config::invalidate_config_cache();
+    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+}
+
+#[test]
+fn extraction_cadence_precedes_empty_relevance_and_counts_logical_turns() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let old = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(temp.path().join("config.toml"), "[agents]\nmemory_extraction_enabled = false\n").unwrap();
+    crate::config::invalidate_config_cache();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (_, rx) = mpsc::channel(1);
+        let mut agent = MemoryAgent::new(rx);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let messages: Arc<[_]> = vec![crate::message::Message::tool_result(
+            "check", "Verified the temporary test database is reachable and its schema matches the expected migration version.", false,
+        )].into();
+        assert!(memory::format_context_for_relevance(&messages).is_empty());
+        assert!(memory::format_context_for_extraction(&messages).len() >= 200);
+        rt.block_on(async {
+            for turn in 0..PERIODIC_EXTRACTION_INTERVAL - 1 {
+                for _ in 0..3 {
+                    agent.process_context("cadence", Some(&turn.to_string()), messages.clone(), Instant::now()).await.unwrap();
+                }
+                assert_eq!(agent.session_state("cadence").turns_since_extraction, turn + 1,
+                    "continuations must count once, even when relevance is empty");
+            }
+            agent.process_context("other-session", Some("0"), messages.clone(), Instant::now()).await.unwrap();
+            assert_eq!(agent.session_state("other-session").turns_since_extraction, 1);
+            for _ in 0..3 {
+                agent.process_context("legacy", None, messages.clone(), Instant::now()).await.unwrap();
+            }
+            assert_eq!(agent.session_state("legacy").turns_since_extraction, 1);
+        });
+    }));
+    match old { Some(value) => crate::env::set_var("JCODE_HOME", value), None => crate::env::remove_var("JCODE_HOME") }
+    crate::config::invalidate_config_cache();
+    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+}
+
 #[test]
 fn extraction_transcript_omits_internal_system_reminders() {
     let messages = vec![

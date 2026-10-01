@@ -101,6 +101,23 @@ pub fn set_active_provider(provider: Arc<dyn Provider>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
 }
 
+#[cfg(test)]
+pub(crate) struct TestActiveProvider(Option<Arc<dyn Provider>>);
+
+#[cfg(test)]
+impl TestActiveProvider {
+    pub(crate) fn install(provider: Arc<dyn Provider>) -> Self {
+        Self(ACTIVE_PROVIDER.write().unwrap().replace(provider))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestActiveProvider {
+    fn drop(&mut self) {
+        *ACTIVE_PROVIDER.write().unwrap_or_else(|e| e.into_inner()) = self.0.take();
+    }
+}
+
 /// Fetch the registered active provider, if any. Returns a forked handle so the
 /// caller gets an independent provider instance (per the [`Provider::fork`]
 /// contract) that will not interfere with the main agent's model selection.

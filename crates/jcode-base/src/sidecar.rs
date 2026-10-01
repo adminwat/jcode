@@ -159,6 +159,49 @@ impl Sidecar {
         Self::with_configured_model(configured_model)
     }
 
+    pub fn for_extraction() -> Result<Option<Self>> {
+        let config = crate::config::config();
+        if !config.agents.memory_extraction_enabled.unwrap_or(config.agents.memory_sidecar_enabled) {
+            return Ok(None);
+        }
+        Self::extraction_with_config(
+            &config.agents,
+            crate::provider::active_provider_fork(),
+        )
+    }
+
+    fn extraction_with_config(
+        agents: &crate::config::AgentsConfig,
+        provider: Option<Arc<dyn crate::provider::Provider>>,
+    ) -> Result<Option<Self>> {
+        if !agents.memory_extraction_enabled.unwrap_or(agents.memory_sidecar_enabled) {
+            return Ok(None);
+        }
+        if let Some(model) = agents.memory_extraction_model.as_ref().or(agents.memory_model.as_ref()) {
+            let model = model.trim();
+            anyhow::ensure!(!model.is_empty(), "Memory extraction model must not be blank");
+            let provider = provider.ok_or_else(|| anyhow::anyhow!(
+                "Memory extraction route '{model}' requires an active provider"
+            ))?;
+            provider.set_model(model).with_context(|| format!(
+                "Cannot select memory extraction route '{model}'; refusing fallback"
+            ))?;
+            return Ok(Some(Self {
+                client: crate::provider::shared_http_client(),
+                model: provider.model(),
+                max_tokens: DEFAULT_MAX_TOKENS,
+                backend: SidecarBackend::Provider,
+                provider: Some(provider),
+                reasoning_override: None,
+            }));
+        }
+        anyhow::ensure!(agents.memory_sidecar_enabled,
+            "Independent memory extraction requires memory_extraction_model or memory_model");
+        anyhow::ensure!(Self::llm_backend_available(), "Memory extraction backend unavailable");
+        // Preserve legacy auto-selection only for users who already enabled it.
+        Ok(Some(Self::with_configured_model(None)))
+    }
+
     fn with_configured_model(configured_model: Option<String>) -> Self {
         let (backend, model, provider) = if let Some(model) = configured_model {
             match crate::provider::provider_for_model(&model) {
@@ -1364,6 +1407,83 @@ mod tests {
                 reply: self.reply.clone(),
             })
         }
+    }
+
+    struct ExtractionRouteProvider(std::sync::Mutex<String>);
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for ExtractionRouteProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            let model = self.model();
+            Ok(Box::pin(futures::stream::once(async move {
+                Ok(jcode_message_types::StreamEvent::TextDelta(model))
+            })))
+        }
+        fn name(&self) -> &str { "extraction-route-test" }
+        fn model(&self) -> String { self.0.lock().unwrap().clone() }
+        fn set_model(&self, model: &str) -> Result<()> {
+            anyhow::ensure!(model == "test-profile:extractor", "unknown test route");
+            *self.0.lock().unwrap() = model.into();
+            Ok(())
+        }
+        fn fork(&self) -> Arc<dyn crate::provider::Provider> {
+            Arc::new(Self(std::sync::Mutex::new(self.model())))
+        }
+    }
+
+    #[test]
+    fn extraction_config_preserves_opt_out_and_requires_an_explicit_route() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+        let mut agents = crate::config::AgentsConfig {
+            memory_sidecar_enabled: false,
+            ..Default::default()
+        };
+        assert!(Sidecar::extraction_with_config(&agents, None).unwrap().is_none());
+        agents.memory_extraction_enabled = Some(true);
+        assert!(Sidecar::extraction_with_config(&agents, None).is_err(), "independent opt-in must not silently select a paid default");
+        agents.memory_extraction_model = Some("test-profile:extractor".into());
+        assert!(Sidecar::extraction_with_config(&agents, None).is_err(), "missing provider must fail explicitly");
+        agents.memory_sidecar_enabled = true;
+        agents.memory_extraction_enabled = Some(false);
+        assert!(Sidecar::extraction_with_config(&agents, None).unwrap().is_none(), "extraction opt-out wins over relevance enablement");
+    }
+
+    #[test]
+    fn extraction_config_pins_the_exact_profile_and_never_falls_back() {
+        use crate::provider::Provider;
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let provider = Arc::new(ExtractionRouteProvider(std::sync::Mutex::new("coordinator".into())));
+        let mut agents = crate::config::AgentsConfig {
+            memory_sidecar_enabled: false,
+            memory_extraction_enabled: Some(true),
+            memory_extraction_model: Some("test-profile:extractor".into()),
+            memory_model: Some("unwanted-relevance-route".into()),
+            ..Default::default()
+        };
+        let sidecar = Sidecar::extraction_with_config(&agents, Some(provider.fork())).unwrap().expect("independent extraction must be enabled");
+        assert_eq!(sidecar.backend_name(), "provider");
+        assert_eq!(sidecar.model_name(), "test-profile:extractor");
+        assert_eq!(provider.model(), "coordinator", "route selection must not mutate the coordinator");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        assert_eq!(rt.block_on(sidecar.complete("extract", "evidence")).unwrap(), "test-profile:extractor");
+        agents.memory_extraction_model = Some("unknown-route".into());
+        assert!(Sidecar::extraction_with_config(&agents, Some(provider.fork())).is_err());
+        agents.memory_extraction_model = Some(" ".into());
+        assert!(Sidecar::extraction_with_config(&agents, Some(provider.fork())).is_err());
+        agents.memory_extraction_model = None;
+        agents.memory_model = Some("test-profile:extractor".into());
+        assert_eq!(Sidecar::extraction_with_config(&agents, Some(provider.fork())).unwrap().unwrap().model_name(), "test-profile:extractor");
     }
 
     #[test]

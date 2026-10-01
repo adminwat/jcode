@@ -148,10 +148,14 @@ impl App {
 
         let transcript = crate::memory_agent::build_transcript_for_extraction(&provider_messages);
 
-        if !crate::memory::memory_llm_judge_available() {
-            crate::logging::info("Memory extraction skipped: LLM judge unavailable");
-            return;
-        }
+        let sidecar = match crate::sidecar::Sidecar::for_extraction() {
+            Ok(Some(sidecar)) => sidecar,
+            Ok(None) => return,
+            Err(e) => {
+                crate::logging::warn(&format!("Memory extraction unavailable: {e}"));
+                return;
+            }
+        };
 
         // Extract memories using sidecar (with existing context for dedup)
         let manager = self
@@ -173,7 +177,6 @@ impl App {
             .filter(|e| e.active)
             .map(|e| e.content)
             .collect();
-        let sidecar = crate::sidecar::Sidecar::new();
         match sidecar
             .extract_memories_with_existing(&transcript, &existing)
             .await

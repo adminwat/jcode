@@ -579,6 +579,13 @@ pub struct AgentsConfig {
     /// no-LLM path.
     #[serde(default = "default_memory_sidecar_enabled")]
     pub memory_sidecar_enabled: bool,
+    /// Independently enable memory extraction. Unset inherits the sidecar
+    /// setting, preserving existing opt-outs. Enabling extraction with the
+    /// sidecar disabled requires an explicit extraction or memory model.
+    pub memory_extraction_enabled: Option<bool>,
+    /// Exact provider/model route for extraction, including configured profiles.
+    /// Unset inherits memory_model. Invalid routes fail without auto-fallback.
+    pub memory_extraction_model: Option<String>,
     /// Minimum turns between Mode-2 memory reranks (cadence floor). The
     /// expensive listwise LLM rerank runs at most once per this many turns;
     /// skipped turns fall back to hybrid-ordered surfacing. A topic change or
@@ -661,6 +668,8 @@ impl Default for AgentsConfig {
             swarm_strip_layout: SwarmStripLayout::default(),
             memory_model: None,
             memory_sidecar_enabled: default_memory_sidecar_enabled(),
+            memory_extraction_enabled: None,
+            memory_extraction_model: None,
             memory_rerank_cadence: default_memory_rerank_cadence(),
             memory_rerank_votes: default_memory_rerank_votes(),
             memory_rerank_min_agree: default_memory_rerank_min_agree(),

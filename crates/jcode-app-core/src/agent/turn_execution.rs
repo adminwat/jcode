@@ -974,13 +974,14 @@ impl Agent {
 
         let transcript = self.build_transcript_for_extraction();
 
-        if !crate::memory::memory_llm_judge_available() {
-            logging::info("Memory extraction skipped: LLM judge unavailable");
-            return 0;
-        }
-
-        // Extract using sidecar
-        let sidecar = crate::sidecar::Sidecar::new();
+        let sidecar = match crate::sidecar::Sidecar::for_extraction() {
+            Ok(Some(sidecar)) => sidecar,
+            Ok(None) => return 0,
+            Err(e) => {
+                logging::warn(&format!("Memory extraction unavailable: {e}"));
+                return 0;
+            }
+        };
         match sidecar.extract_memories(&transcript).await {
             Ok(extracted) if !extracted.is_empty() => {
                 let manager = self

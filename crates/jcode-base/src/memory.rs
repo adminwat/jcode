@@ -1137,7 +1137,12 @@ impl MemoryManager {
         // A cross-process graph transaction is a separate storage concern.
         static EXTRACTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = EXTRACTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut graph = self.load_project_graph()?;
+        let has_project = self.project_memory_path()?.is_some();
+        let mut graph = if has_project {
+            self.load_project_graph()?
+        } else {
+            self.load_global_graph()?
+        };
         if let Some(existing) = graph.get_memory(&id) {
             anyhow::ensure!(
                 existing.content == memory.content,
@@ -1161,7 +1166,11 @@ impl MemoryManager {
             entry.ensure_embedding();
         }
         graph.add_memory(entry);
-        self.save_project_graph(&graph)?;
+        if has_project {
+            self.save_project_graph(&graph)?;
+        } else {
+            self.save_global_graph(&graph)?;
+        }
         Ok((id, true))
     }
 
@@ -1171,12 +1180,9 @@ impl MemoryManager {
         transcript: &str,
         session_id: &str,
     ) -> Result<Vec<String>> {
-        if !memory_llm_judge_available() {
-            crate::logging::info("Memory transcript extraction skipped: LLM judge unavailable");
+        let Some(sidecar) = Sidecar::for_extraction()? else {
             return Ok(Vec::new());
-        }
-
-        let sidecar = Sidecar::new();
+        };
         let extracted = sidecar.extract_memories(transcript).await?;
 
         let mut ids = Vec::new();
