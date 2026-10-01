@@ -842,7 +842,17 @@ fn build_tools_prunes_required_names_not_defined_in_the_same_object() {
             "type": "object",
             "properties": {
                 "action": { "type": "string" },
-                "label": { "type": "string" }
+                "label": { "type": "string" },
+                "nested": {
+                    "type": "object",
+                    "anyOf": [{
+                        "type": "object",
+                        "required": ["action", "label"],
+                        "properties": {
+                            "action": { "type": "string", "enum": ["spawn"] }
+                        }
+                    }]
+                }
             },
             "required": ["action"],
             "anyOf": [
@@ -860,8 +870,9 @@ fn build_tools_prunes_required_names_not_defined_in_the_same_object() {
     let built = build_tools(&defs).expect("gemini tools");
     let parameters = &built[0].function_declarations[0].parameters;
 
+    assert!(parameters.get("anyOf").is_none(), "Gemini root combiners must be flattened");
     assert_eq!(
-        parameters["anyOf"][0]["required"],
+        parameters["properties"]["nested"]["anyOf"][0]["required"],
         json!(["action"]),
         "the undefined `label` requirement must be pruned from the branch"
     );
