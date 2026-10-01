@@ -183,20 +183,11 @@ async fn run_final_extraction(transcript: String, session_id: String, working_di
             let mut stored_count = 0;
 
             for mem in &extracted {
-                let category = crate::memory::MemoryCategory::from_extracted(&mem.category);
-
-                let trust = match mem.trust.as_str() {
-                    "high" => crate::memory::TrustLevel::High,
-                    "low" => crate::memory::TrustLevel::Low,
-                    _ => crate::memory::TrustLevel::Medium,
-                };
-
-                let entry = crate::memory::MemoryEntry::new(category, &mem.content)
-                    .with_source(format!("{session_id}#{}", mem.evidence_id))
-                    .with_trust(trust);
-
-                if manager.remember_project(entry).is_ok() {
-                    stored_count += 1;
+                match manager.remember_extracted(mem, &session_id) {
+                    Ok((_, inserted)) => stored_count += usize::from(inserted),
+                    Err(e) => {
+                        crate::logging::warn(&format!("Final extraction storage failed: {e}"))
+                    }
                 }
             }
 
@@ -1116,9 +1107,6 @@ impl MemoryAgent {
             }
         };
 
-        // Similarity threshold for duplicate detection
-        const DUPLICATE_THRESHOLD: f32 = 0.90;
-
         // Run extraction in background - don't block the main flow
         tokio::spawn(async move {
             match sidecar
@@ -1127,184 +1115,29 @@ impl MemoryAgent {
             {
                 Ok(extracted) if !extracted.is_empty() => {
                     let mut stored_count = 0;
-                    let mut stored_ids: Vec<String> = Vec::new();
-                    let mut known_ids: Vec<String> = Vec::new();
-                    let mut reinforced_count = 0;
-                    let mut superseded_count = 0;
-
+                    let mut known_ids = Vec::new();
                     for mem in extracted {
-                        let category = match mem.category.as_str() {
-                            "fact" => memory::MemoryCategory::Fact,
-                            "preference" => memory::MemoryCategory::Preference,
-                            "correction" => memory::MemoryCategory::Correction,
-                            _ => memory::MemoryCategory::Fact,
-                        };
-
-                        let trust = match mem.trust.as_str() {
-                            "high" => memory::TrustLevel::High,
-                            "low" => memory::TrustLevel::Low,
-                            _ => memory::TrustLevel::Medium,
-                        };
-
-                        // Check for duplicate: find semantically similar existing memories
-                        let similar =
-                            memory_manager.find_similar(&mem.content, DUPLICATE_THRESHOLD, 1);
-
-                        if let Ok(matches) = similar
-                            && let Some((existing, _sim)) = matches.first()
-                        {
-                            let existing_id = existing.id.clone();
-                            let mut did_reinforce = false;
-
-                            if let Ok(mut graph) = memory_manager.load_project_graph()
-                                && graph.get_memory(&existing_id).is_some()
-                            {
-                                let strength = if let Some(entry) =
-                                    graph.get_memory_mut(&existing_id)
-                                {
-                                    entry.reinforce("incremental", 0);
-                                    entry.strength
-                                } else {
-                                    crate::logging::warn(&format!(
-                                        "Expected project memory {} during reinforcement, but it disappeared before update",
-                                        existing_id
-                                    ));
-                                    continue;
-                                };
-                                if memory_manager.save_project_graph(&graph).is_ok() {
-                                    did_reinforce = true;
-                                    crate::logging::info(&format!(
-                                        "Reinforced existing memory {} (strength={})",
-                                        existing_id, strength
-                                    ));
-                                }
-                            }
-
-                            if !did_reinforce
-                                && let Ok(mut graph) = memory_manager.load_global_graph()
-                                && graph.get_memory(&existing_id).is_some()
-                            {
-                                if let Some(entry) = graph.get_memory_mut(&existing_id) {
-                                    entry.reinforce("incremental", 0);
-                                    let _ = memory_manager.save_global_graph(&graph);
-                                    did_reinforce = true;
-                                } else {
-                                    crate::logging::warn(&format!(
-                                        "Expected global memory {} during reinforcement, but it disappeared before update",
-                                        existing_id
-                                    ));
-                                }
-                            }
-
-                            if did_reinforce {
-                                reinforced_count += 1;
-                                known_ids.push(existing_id.clone());
-                            }
-                            continue;
-                        }
-
-                        // No duplicate - check for contradiction in same category
-                        let contradiction_found =
-                            match memory_manager.find_similar(&mem.content, 0.5, 5) {
-                                Ok(candidates) => {
-                                    let mut found = None;
-                                    for (candidate, _) in &candidates {
-                                        if candidate.category == category {
-                                            match sidecar
-                                                .check_contradiction(
-                                                    &mem.content,
-                                                    &candidate.content,
-                                                )
-                                                .await
-                                            {
-                                                Ok(true) => {
-                                                    found = Some(candidate.id.clone());
-                                                    break;
-                                                }
-                                                Ok(false) => {}
-                                                Err(e) => {
-                                                    crate::logging::info(&format!(
-                                                        "Contradiction check failed: {}",
-                                                        e
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    found
-                                }
-                                Err(_) => None,
-                            };
-
-                        // Create the new memory
-                        let entry = memory::MemoryEntry::new(category, &mem.content)
-                            .with_source(format!("{session_id_owned}#{}", mem.evidence_id))
-                            .with_trust(trust);
-
-                        match memory_manager.remember_project(entry) {
-                            Ok(new_id) => {
-                                stored_count += 1;
-                                stored_ids.push(new_id.clone());
-
-                                // If contradiction found, supersede the old memory and add Contradicts edge
-                                if let Some(old_id) = contradiction_found
-                                    && let Ok(mut graph) = memory_manager.load_project_graph()
-                                {
-                                    graph.mark_contradiction(&new_id, &old_id);
-                                    if let Some(old_entry) = graph.get_memory_mut(&old_id) {
-                                        old_entry.supersede(&new_id);
-                                    }
-                                    if memory_manager.save_project_graph(&graph).is_ok() {
-                                        superseded_count += 1;
-                                        crate::logging::info(&format!(
-                                            "Superseded memory {} with {} (Contradicts edge added)",
-                                            old_id, new_id
-                                        ));
-                                    }
-                                }
+                        match memory_manager.remember_extracted(&mem, &session_id_owned) {
+                            Ok((id, inserted)) => {
+                                stored_count += usize::from(inserted);
+                                known_ids.push(id);
                             }
                             Err(e) => {
-                                crate::logging::info(&format!("Failed to store memory: {}", e));
+                                crate::logging::warn(&format!("Extraction storage failed: {e}"));
+                                memory::add_event(MemoryEventKind::Error {
+                                    message: e.to_string(),
+                                });
                             }
                         }
                     }
-
-                    // Create DerivedFrom edges between co-extracted memories
-                    if stored_ids.len() >= 2
-                        && let Ok(mut graph) = memory_manager.load_project_graph()
-                    {
-                        let mut linked = false;
-                        for i in 0..stored_ids.len() {
-                            for j in (i + 1)..stored_ids.len() {
-                                graph.add_edge(
-                                    &stored_ids[i],
-                                    &stored_ids[j],
-                                    crate::memory_graph::EdgeKind::DerivedFrom,
-                                );
-                                linked = true;
-                            }
-                        }
-                        if linked {
-                            let _ = memory_manager.save_project_graph(&graph);
-                        }
-                    }
-
-                    let total = stored_count + reinforced_count;
-                    if total > 0 {
-                        crate::logging::info(&format!(
-                            "Incremental extraction: {} stored, {} reinforced, {} superseded",
-                            stored_count, reinforced_count, superseded_count
-                        ));
-                        memory::add_event(MemoryEventKind::ExtractionComplete { count: total });
-                    }
-
-                    // The session this transcript came from already contains
-                    // this information verbatim; re-injecting freshly
-                    // extracted (or just-reinforced) memories back into it
-                    // would be a pure echo. Mark them as known so retrieval
-                    // skips them for this session (other sessions still see
-                    // them normally).
-                    known_ids.extend(stored_ids.iter().cloned());
+                    crate::logging::info(&format!(
+                        "Incremental extraction: {stored_count} new evidence records stored"
+                    ));
+                    memory::add_event(MemoryEventKind::ExtractionComplete {
+                        count: stored_count,
+                    });
+                    // This session already contains the quoted evidence. Replays
+                    // are known too, but do not strengthen or rewrite the record.
                     memory::mark_memories_known(
                         &session_id_owned,
                         &known_ids,

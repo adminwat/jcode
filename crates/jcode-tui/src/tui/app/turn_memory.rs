@@ -188,23 +188,9 @@ impl App {
                 let mut stored_count = 0;
 
                 for memory in extracted {
-                    let category = crate::memory::MemoryCategory::from_extracted(&memory.category);
-
-                    // Map trust string to enum
-                    let trust = match memory.trust.as_str() {
-                        "high" => crate::memory::TrustLevel::High,
-                        "low" => crate::memory::TrustLevel::Low,
-                        _ => crate::memory::TrustLevel::Medium,
-                    };
-
-                    // Create memory entry
-                    let entry = crate::memory::MemoryEntry::new(category, memory.content)
-                        .with_source(format!("{}#{}", self.session.id, memory.evidence_id))
-                        .with_trust(trust);
-
-                    // Store memory
-                    if manager.remember_project(entry).is_ok() {
-                        stored_count += 1;
+                    match manager.remember_extracted(&memory, &self.session.id) {
+                        Ok((_, inserted)) => stored_count += usize::from(inserted),
+                        Err(e) => crate::logging::warn(&format!("Extraction storage failed: {e}")),
                     }
                 }
 

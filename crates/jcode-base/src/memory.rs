@@ -1116,6 +1116,55 @@ impl MemoryManager {
 
     // === Sidecar Integration ===
 
+    /// Store an attributed source once. Similar wording is not corroboration,
+    /// and conflicting evidence must not silently replace earlier evidence.
+    pub fn remember_extracted(
+        &self,
+        memory: &crate::sidecar::ExtractedMemory,
+        session_id: &str,
+    ) -> Result<(String, bool)> {
+        use sha2::{Digest, Sha256};
+
+        anyhow::ensure!(
+            !session_id.trim().is_empty()
+                && !memory.evidence_id.trim().is_empty()
+                && !memory.content.trim().is_empty(),
+            "Extracted memory requires a session, evidence ID, and content"
+        );
+        let identity = serde_json::to_vec(&(session_id, &memory.evidence_id))?;
+        let id = format!("evidence_{:x}", Sha256::digest(identity));
+        // ponytail: serialize in-process extractors, not every graph writer.
+        // A cross-process graph transaction is a separate storage concern.
+        static EXTRACTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = EXTRACTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut graph = self.load_project_graph()?;
+        if let Some(existing) = graph.get_memory(&id) {
+            anyhow::ensure!(
+                existing.content == memory.content,
+                "Conflicting content for extracted evidence {id}"
+            );
+            return Ok((id, false));
+        }
+        let trust = match memory.trust.as_str() {
+            "high" => TrustLevel::High,
+            "low" => TrustLevel::Low,
+            _ => TrustLevel::Medium,
+        };
+        let mut entry = MemoryEntry::new(
+            MemoryCategory::from_extracted(&memory.category),
+            &memory.content,
+        )
+        .with_source(format!("{session_id}#{}", memory.evidence_id))
+        .with_trust(trust);
+        entry.id = id.clone();
+        if self.should_generate_embedding_for_entry(&entry) {
+            entry.ensure_embedding();
+        }
+        graph.add_memory(entry);
+        self.save_project_graph(&graph)?;
+        Ok((id, true))
+    }
+
     /// Extract from the JSONL evidence produced by build_transcript_for_extraction.
     pub async fn extract_from_transcript(
         &self,
@@ -1132,19 +1181,7 @@ impl MemoryManager {
 
         let mut ids = Vec::new();
         for memory in extracted {
-            let category: MemoryCategory = memory.category.parse().unwrap_or(MemoryCategory::Fact);
-            let trust = match memory.trust.as_str() {
-                "high" => TrustLevel::High,
-                "medium" => TrustLevel::Medium,
-                _ => TrustLevel::Low,
-            };
-
-            let entry = MemoryEntry::new(category, memory.content)
-                .with_source(format!("{session_id}#{}", memory.evidence_id))
-                .with_trust(trust);
-
-            // Store in project scope by default
-            let id = self.remember_project(entry)?;
+            let (id, _) = self.remember_extracted(&memory, session_id)?;
             ids.push(id);
         }
 

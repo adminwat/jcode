@@ -13,6 +13,162 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static PENDING_MEMORY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn extraction_storage_is_idempotent_and_preserves_conflicting_evidence() {
+    with_temp_home(|home| {
+        let manager = MemoryManager::new().with_project_dir(home);
+        let evidence = crate::sidecar::ExtractedMemory {
+            category: "entity".into(),
+            content: "User stated: The memory service is not running.".into(),
+            trust: "high".into(),
+            evidence_id: "evidence-one".into(),
+        };
+        let (id, inserted) = manager
+            .remember_extracted(&evidence, "full-session-id")
+            .unwrap();
+        assert!(inserted);
+        let before = manager.load_project_graph().unwrap();
+        let before_entry = serde_json::to_value(before.get_memory(&id).unwrap()).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let (again, inserted) = manager
+            .remember_extracted(&evidence, "full-session-id")
+            .unwrap();
+        assert!(
+            !inserted,
+            "overlapping extraction must not count the same source twice"
+        );
+        assert_eq!(id, again);
+        let after = manager.load_project_graph().unwrap();
+        assert_eq!(
+            before_entry,
+            serde_json::to_value(after.get_memory(&id).unwrap()).unwrap()
+        );
+        assert_eq!(
+            after.get_memory(&id).unwrap().category,
+            MemoryCategory::Entity
+        );
+
+        let conflicting = crate::sidecar::ExtractedMemory {
+            content: "Tool reported: The memory service is running.".into(),
+            trust: "medium".into(),
+            evidence_id: "evidence-two".into(),
+            ..evidence.clone()
+        };
+        let (other, inserted) = manager
+            .remember_extracted(&conflicting, "full-session-id")
+            .unwrap();
+        assert!(inserted);
+        assert_ne!(id, other);
+        let (separate, inserted) = manager
+            .remember_extracted(&evidence, "different-session")
+            .unwrap();
+        assert!(inserted);
+        assert_ne!(separate, id);
+        let graph = manager.load_project_graph().unwrap();
+        assert_eq!(graph.memories.len(), 3);
+        assert!(
+            graph
+                .memories
+                .values()
+                .all(|e| e.active && e.superseded_by.is_none())
+        );
+        assert!(
+            graph.edges.is_empty(),
+            "co-extraction is not evidence of derivation"
+        );
+        let tampered = crate::sidecar::ExtractedMemory {
+            evidence_id: evidence.evidence_id.clone(),
+            ..conflicting
+        };
+        assert!(
+            manager
+                .remember_extracted(&tampered, "full-session-id")
+                .is_err()
+        );
+        assert_eq!(
+            before_entry,
+            serde_json::to_value(
+                manager
+                    .load_project_graph()
+                    .unwrap()
+                    .get_memory(&id)
+                    .unwrap()
+            )
+            .unwrap()
+        );
+    });
+}
+
+#[test]
+fn extraction_storage_serializes_overlapping_extractors() {
+    with_temp_home(|home| {
+        let results = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..16)
+                .map(|i| {
+                    scope.spawn(move || {
+                        let manager = MemoryManager::new().with_project_dir(home);
+                        let evidence = crate::sidecar::ExtractedMemory {
+                            category: "fact".into(),
+                            content: format!(
+                                "Tool reported: Evidence record {} remains available.",
+                                i % 8
+                            ),
+                            trust: "medium".into(),
+                            evidence_id: format!("record-{}", i % 8),
+                        };
+                        manager
+                            .remember_extracted(&evidence, "concurrent-session")
+                            .unwrap()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|w| w.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(results.iter().filter(|(_, inserted)| *inserted).count(), 8);
+        let graph = MemoryManager::new()
+            .with_project_dir(home)
+            .load_project_graph()
+            .unwrap();
+        assert_eq!(graph.memories.len(), 8);
+        assert!(graph.edges.is_empty());
+    });
+}
+
+#[test]
+fn extraction_storage_requires_unambiguous_source_identity() {
+    with_temp_home(|home| {
+        let manager = MemoryManager::new().with_project_dir(home);
+        let mut evidence = crate::sidecar::ExtractedMemory {
+            category: "fact".into(),
+            content: "Tool reported: The health read path failed.".into(),
+            trust: "medium".into(),
+            evidence_id: "c".into(),
+        };
+        assert!(manager.remember_extracted(&evidence, " ").is_err());
+        let (first, _) = manager.remember_extracted(&evidence, "a#b").unwrap();
+        let restarted = MemoryManager::new().with_project_dir(home);
+        assert_eq!(
+            restarted.remember_extracted(&evidence, "a#b").unwrap(),
+            (first.clone(), false)
+        );
+        evidence.evidence_id = "b#c".into();
+        let (second, _) = restarted.remember_extracted(&evidence, "a").unwrap();
+        assert_ne!(
+            first, second,
+            "identity tuples cannot be joined with an ambiguous delimiter"
+        );
+        evidence.evidence_id.clear();
+        assert!(manager.remember_extracted(&evidence, "a").is_err());
+        evidence.evidence_id = "valid".into();
+        evidence.content = " ".into();
+        assert!(manager.remember_extracted(&evidence, "a").is_err());
+        assert_eq!(manager.load_project_graph().unwrap().memories.len(), 2);
+    });
+}
+
 fn with_temp_home<F, T>(f: F) -> T
 where
     F: FnOnce(&Path) -> T,
