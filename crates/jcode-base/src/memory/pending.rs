@@ -369,6 +369,7 @@ pub fn clear_all_injected_memories() {
 
 /// Clear any pending memory result for a session.
 pub fn clear_pending_memory(session_id: &str) {
+    super::clear_turn_memory(session_id);
     if let Ok(mut guard) = PENDING_MEMORY.lock()
         && let Some(map) = guard.as_mut()
     {

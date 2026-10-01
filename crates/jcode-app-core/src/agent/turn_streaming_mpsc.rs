@@ -156,16 +156,9 @@ impl Agent {
             }
 
             let messages: std::sync::Arc<[Message]> = messages.into();
-            // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_pending = self.build_memory_prompt_nonblocking_shared(
-                std::sync::Arc::clone(&messages),
-                Some(std::sync::Arc::new({
-                    let event_tx = event_tx.clone();
-                    move |event| {
-                        let _ = event_tx.send(event);
-                    }
-                })),
-            );
+            let memory_pending = self
+                .build_turn_memory_prompt(std::sync::Arc::clone(&messages))
+                .await;
             // Use split prompt for better caching - static content cached, dynamic not
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
 
@@ -189,15 +182,13 @@ impl Agent {
 
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
-            if let Some(memory) = memory_pending.as_ref() {
+            if let Some(memory) = memory_pending
+                .memory
+                .as_ref()
+                .filter(|_| memory_pending.first_delivery)
+            {
                 let memory_count = memory.count.max(1);
                 let computed_age_ms = memory.computed_at.elapsed().as_millis() as u64;
-                crate::memory::record_injected_prompt(
-                    &memory.prompt,
-                    memory_count,
-                    computed_age_ms,
-                );
-                self.record_memory_injection_in_session(memory);
                 let _ = event_tx.send(ServerEvent::MemoryInjected {
                     count: memory_count,
                     prompt: memory.prompt.clone(),
@@ -205,7 +196,10 @@ impl Agent {
                     prompt_chars: memory.prompt.chars().count(),
                     computed_age_ms,
                 });
-                let (memory_msg, persisted) = self.prepare_memory_injection_message(memory);
+            }
+            if let Some((memory_msg, persisted)) =
+                self.prepare_turn_memory_injection(&memory_pending, &messages)
+            {
                 if !persisted {
                     ephemeral_signature_messages.push(memory_msg.clone());
                 } else {

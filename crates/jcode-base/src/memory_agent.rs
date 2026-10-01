@@ -262,13 +262,24 @@ impl MemoryAgentHandle {
         messages: Arc<[crate::message::Message]>,
         working_dir: Option<String>,
     ) {
-        let msg = AgentMessage::Context {
-            session_id: session_id.to_string(),
-            messages,
-            working_dir,
-            timestamp: Instant::now(),
-        };
-        let _ = self.tx.try_send(msg);
+        self.enqueue(context_message(session_id, messages, working_dir));
+    }
+
+    fn enqueue(&self, msg: AgentMessage) {
+        if let Err(error) = self.tx.try_send(msg) {
+            if let AgentMessage::Context {
+                session_id,
+                turn_id: Some(turn_id),
+                ..
+            } = error.into_inner()
+            {
+                memory::complete_turn_memory(&session_id, &turn_id, None);
+                crate::memory_log::log_pending_discarded(
+                    &session_id,
+                    "retrieval_queue_unavailable",
+                );
+            }
+        }
     }
 
     /// Reset all memory agent state (call on new session)
@@ -281,11 +292,69 @@ impl MemoryAgentHandle {
 enum AgentMessage {
     Context {
         session_id: String,
+        turn_id: Option<String>,
         messages: Arc<[crate::message::Message]>,
         working_dir: Option<String>,
         timestamp: Instant,
     },
     Reset,
+}
+
+fn context_message(
+    session_id: &str,
+    messages: Arc<[crate::message::Message]>,
+    working_dir: Option<String>,
+) -> AgentMessage {
+    AgentMessage::Context {
+        session_id: session_id.to_owned(),
+        turn_id: memory::current_memory_turn(session_id),
+        messages,
+        working_dir,
+        timestamp: Instant::now(),
+    }
+}
+
+#[cfg(test)]
+mod turn_queue_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn turn_memory_queue_captures_identity_and_completes_failures() {
+        let sid = "turn-queue-capture";
+        let (tx, mut rx) = mpsc::channel(1);
+        let handle = MemoryAgentHandle { tx };
+        memory::begin_turn_memory(sid, "old");
+        let captured = context_message(sid, Vec::new().into(), None);
+        memory::begin_turn_memory(sid, "new");
+        handle.enqueue(captured);
+        // A full queue must complete the current turn, not leave it waiting.
+        handle.update_context_sync(sid, Vec::new().into());
+        assert!(memory::read_turn_memory(sid, "new").ready);
+        match rx.recv().await.unwrap() {
+            AgentMessage::Context { turn_id, .. } => assert_eq!(turn_id.as_deref(), Some("old")),
+            _ => panic!("expected captured context"),
+        }
+        memory::begin_turn_memory(sid, "closed");
+        drop(rx);
+        handle.update_context_sync(sid, Vec::new().into());
+        assert!(memory::read_turn_memory(sid, "closed").ready);
+        memory::clear_turn_memory(sid);
+    }
+
+    #[tokio::test]
+    async fn turn_memory_empty_context_completes_without_a_backend() {
+        let sid = "turn-queue-empty";
+        let (tx, rx) = mpsc::channel(1);
+        let handle = MemoryAgentHandle { tx };
+        memory::begin_turn_memory(sid, "empty");
+        handle.update_context_sync(sid, Vec::new().into());
+        drop(handle);
+        MemoryAgent::new(rx).run().await;
+        let result = memory::read_turn_memory(sid, "empty");
+        assert!(result.ready);
+        assert!(result.memory.is_none());
+        memory::clear_turn_memory(sid);
+    }
 }
 
 /// Minimum turns before we consider extracting on topic change
@@ -448,10 +517,15 @@ impl MemoryAgent {
                 }
                 AgentMessage::Context {
                     session_id,
+                    turn_id,
                     messages,
                     working_dir,
                     timestamp,
                 } => {
+                    if turn_id.is_some() && memory::current_memory_turn(&session_id) != turn_id {
+                        crate::memory_log::log_pending_discarded(&session_id, "superseded_turn");
+                        continue;
+                    }
                     {
                         let ss = self.session_state(&session_id);
                         if working_dir.is_some() {
@@ -474,8 +548,21 @@ impl MemoryAgent {
                         }
                     }
 
-                    if let Err(e) = self.process_context(&session_id, messages, timestamp).await {
+                    if let Err(e) = self
+                        .process_context(&session_id, turn_id.as_deref(), messages, timestamp)
+                        .await
+                    {
                         crate::logging::error(&format!("Memory agent error: {}", e));
+                    }
+                    // Every early exit (no match, unavailable backend, error) is
+                    // a completed abstention, not a permanently pending request.
+                    if let Some(turn_id) = turn_id {
+                        if memory::complete_turn_memory(&session_id, &turn_id, None) {
+                            crate::logging::info(&format!(
+                                "MEMORY_ABSTAIN session={} turn={}",
+                                session_id, turn_id
+                            ));
+                        }
                     }
                 }
             }
@@ -488,6 +575,7 @@ impl MemoryAgent {
     async fn process_context(
         &mut self,
         session_id: &str,
+        turn_id: Option<&str>,
         messages: Arc<[crate::message::Message]>,
         _timestamp: Instant,
     ) -> Result<()> {
@@ -532,7 +620,9 @@ impl MemoryAgent {
         let context_signature = relevance_context_signature(&context);
         {
             let ss = self.session_state(session_id);
-            if ss.last_relevance_context_signature.as_deref() == Some(context_signature.as_str())
+            if turn_id.is_none()
+                && ss.last_relevance_context_signature.as_deref()
+                    == Some(context_signature.as_str())
                 && ss.last_relevance_check_at.is_some_and(|at| {
                     at.elapsed().as_secs() < RELEVANCE_CONTEXT_REPEAT_SUPPRESSION_SECS
                 })
@@ -726,8 +816,9 @@ impl MemoryAgent {
             candidates
                 .into_iter()
                 .filter(|(entry, _)| {
-                    !ss.surfaced_memories.contains(&entry.id)
-                        && !memory::is_memory_injected(session_id, &entry.id)
+                    turn_id.is_some()
+                        || (!ss.surfaced_memories.contains(&entry.id)
+                            && !memory::is_memory_injected(session_id, &entry.id))
                 })
                 .collect()
         };
@@ -876,13 +967,6 @@ impl MemoryAgent {
         // Step 4: Format and store for main agent
         if !relevant.is_empty() {
             let ids: Vec<String> = relevant.iter().map(|e| e.id.clone()).collect();
-            {
-                let ss = self.session_state(session_id);
-                for entry in &relevant {
-                    ss.surfaced_memories.insert(entry.id.clone());
-                }
-            }
-
             if let Some(prompt) = memory::format_relevant_prompt(&relevant, MAX_MEMORIES_PER_TURN) {
                 let display_prompt =
                     memory::format_relevant_display_prompt(&relevant, MAX_MEMORIES_PER_TURN);
@@ -899,13 +983,32 @@ impl MemoryAgent {
                     .count()
                     .max(1);
 
-                memory::set_pending_memory_with_ids_and_display(
-                    session_id,
-                    prompt,
-                    count,
-                    ids,
-                    display_prompt,
-                );
+                if let Some(turn_id) = turn_id {
+                    let pending = memory::PendingMemory {
+                        prompt: prompt.clone(),
+                        display_prompt,
+                        count,
+                        memory_ids: ids.clone(),
+                        computed_at: Instant::now(),
+                    };
+                    if !memory::complete_turn_memory(session_id, turn_id, Some(pending)) {
+                        crate::memory_log::log_pending_discarded(session_id, "superseded_turn");
+                        return Ok(());
+                    }
+                    crate::memory_log::log_pending_prepared(session_id, &prompt, count, &ids);
+                } else {
+                    // Legacy callers still use the single-use pending slot.
+                    self.session_state(session_id)
+                        .surfaced_memories
+                        .extend(ids.iter().cloned());
+                    memory::set_pending_memory_with_ids_and_display(
+                        session_id,
+                        prompt,
+                        count,
+                        ids,
+                        display_prompt,
+                    );
+                }
                 memory::set_state(MemoryState::FoundRelevant { count });
             } else {
                 memory::set_state(MemoryState::Idle);
@@ -1852,11 +1955,7 @@ pub async fn update_context(
     messages: Arc<[crate::message::Message]>,
     working_dir: Option<String>,
 ) {
-    if let Some(handle) = get() {
-        handle
-            .update_context(session_id, messages, working_dir)
-            .await;
-    }
+    update_context_sync_with_dir(session_id, messages, working_dir);
 }
 
 /// Send a context update synchronously (for use from non-async code)
@@ -1870,13 +1969,26 @@ pub fn update_context_sync_with_dir(
     messages: Arc<[crate::message::Message]>,
     working_dir: Option<String>,
 ) {
+    // Capture before initialization yields. A newer user turn may start while
+    // the singleton is being initialized.
+    let msg = context_message(session_id, messages, working_dir);
     if let Some(handle) = get() {
-        handle.update_context_sync_with_dir(session_id, messages, working_dir);
+        handle.enqueue(msg);
     } else {
-        let sid = session_id.to_string();
         tokio::spawn(async move {
-            if let Ok(handle) = init().await {
-                handle.update_context_sync_with_dir(&sid, messages, working_dir);
+            match init().await {
+                Ok(handle) => handle.enqueue(msg),
+                Err(error) => {
+                    if let AgentMessage::Context {
+                        session_id,
+                        turn_id: Some(turn_id),
+                        ..
+                    } = msg
+                    {
+                        memory::complete_turn_memory(&session_id, &turn_id, None);
+                        crate::logging::warn(&format!("Memory initialization failed: {}", error));
+                    }
+                }
             }
         });
     }

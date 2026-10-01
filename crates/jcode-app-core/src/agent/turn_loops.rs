@@ -110,9 +110,9 @@ impl Agent {
             }
 
             let messages: std::sync::Arc<[Message]> = messages.into();
-            // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_pending =
-                self.build_memory_prompt_nonblocking_shared(std::sync::Arc::clone(&messages), None);
+            let memory_pending = self
+                .build_turn_memory_prompt(std::sync::Arc::clone(&messages))
+                .await;
             // Use split prompt for better caching - static content cached, dynamic not
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
 
@@ -127,16 +127,9 @@ impl Agent {
 
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
-            if let Some(memory) = memory_pending.as_ref() {
-                let memory_count = memory.count.max(1);
-                let age_ms = memory.computed_at.elapsed().as_millis() as u64;
-                crate::memory::record_injected_prompt(&memory.prompt, memory_count, age_ms);
-                self.record_memory_injection_in_session(memory);
-                logging::info(&format!(
-                    "Memory injected as message ({} chars)",
-                    memory.prompt.len()
-                ));
-                let (memory_msg, _persisted) = self.prepare_memory_injection_message(memory);
+            if let Some((memory_msg, _persisted)) =
+                self.prepare_turn_memory_injection(&memory_pending, &messages)
+            {
                 messages_with_memory.push(memory_msg);
             }
             if Self::should_inject_batch_nudge(

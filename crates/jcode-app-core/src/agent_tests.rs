@@ -1190,51 +1190,210 @@ async fn restore_session_rehydrates_injected_memory_ids() {
 }
 
 #[tokio::test]
-async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop() {
+async fn build_memory_prompt_replays_current_turn_during_tool_loop() {
     let _guard = crate::storage::lock_test_env();
-    crate::memory::clear_all_pending_memory();
-
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
-    let agent = Agent::new(provider, registry);
+    let mut agent = Agent::new(provider, registry);
+    agent.memory_enabled = true;
+    agent.begin_model_usage_turn("current");
     let session_id = agent.session.id.clone();
-
-    crate::memory::set_pending_memory_with_ids(
+    let turn_id = agent.model_usage_turn_id();
+    crate::memory::begin_turn_memory(&session_id, &turn_id);
+    crate::memory::complete_turn_memory(
         &session_id,
-        "remember this later".to_string(),
-        1,
-        vec!["memory-deferred".to_string()],
+        &turn_id,
+        Some(crate::memory::PendingMemory {
+            prompt: "current-turn context".into(),
+            display_prompt: None,
+            computed_at: Instant::now() - Duration::from_secs(3600),
+            count: 1,
+            memory_ids: vec!["turn-context".into()],
+        }),
     );
-
-    let tool_loop_messages = vec![
+    let messages = vec![
         Message::user("hello"),
-        Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "call_1".to_string(),
-                name: "bash".to_string(),
-                input: serde_json::json!({}),
-                thought_signature: None,
-            }],
-            timestamp: Some(chrono::Utc::now()),
-            tool_duration_ms: None,
-        },
         Message::tool_result("call_1", "ok", false),
     ];
+    let pending = agent.build_memory_prompt_nonblocking(&messages, None).await;
+    assert_eq!(pending.unwrap().prompt, "current-turn context");
+    let replay = agent.build_memory_prompt_nonblocking(&messages, None).await;
+    assert_eq!(replay.unwrap().prompt, "current-turn context");
+    agent.set_memory_enabled(false);
+    assert!(crate::memory::current_memory_turn(&session_id).is_none());
+}
 
-    let pending = agent.build_memory_prompt_nonblocking(&tool_loop_messages, None);
-    assert!(pending.is_none(), "memory should not inject mid tool loop");
-    assert!(crate::memory::has_pending_memory(&session_id));
+#[derive(Clone)]
+struct MemoryReplayProvider {
+    requests: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+    late_session: Option<String>,
+}
 
-    let next_turn_messages = vec![Message::user("follow up")];
-    let pending = agent.build_memory_prompt_nonblocking(&next_turn_messages, None);
-    assert!(
-        pending.is_some(),
-        "memory should inject on the next real user turn"
-    );
-    assert!(!crate::memory::has_pending_memory(&session_id));
+fn replay_fixture() -> crate::memory::PendingMemory {
+    crate::memory::PendingMemory {
+        prompt: "turn-replay-canary".into(),
+        display_prompt: None,
+        computed_at: Instant::now() - Duration::from_secs(3600),
+        count: 1,
+        memory_ids: vec!["replay-canary".into()],
+    }
+}
 
-    crate::memory::clear_all_pending_memory();
+#[async_trait]
+impl Provider for MemoryReplayProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        let call = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(messages.to_vec());
+            requests.len()
+        };
+        if call == 1 {
+            if let Some(sid) = &self.late_session {
+                let turn = crate::memory::current_memory_turn(sid).unwrap();
+                assert!(crate::memory::complete_turn_memory(
+                    sid,
+                    &turn,
+                    Some(replay_fixture())
+                ));
+            }
+        }
+        let events = if call <= 2 {
+            vec![
+                StreamEvent::ToolUseStart {
+                    id: format!("replay-{call}"),
+                    name: "memory_fixture".into(),
+                },
+                StreamEvent::ToolInputDelta("{}".into()),
+                StreamEvent::ToolUseEnd,
+                StreamEvent::MessageEnd {
+                    stop_reason: Some("tool_use".into()),
+                },
+            ]
+        } else {
+            vec![
+                StreamEvent::TextDelta("finished".into()),
+                StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".into()),
+                },
+            ]
+        };
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+    fn name(&self) -> &str {
+        "memory-test"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn turn_memory_reaches_both_real_provider_loops_and_tool_continuations() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let old_persist = std::env::var_os("JCODE_PERSIST_MEMORY_INJECTIONS");
+    let old_hooks = std::env::var_os("JCODE_HOOKS_DISABLED");
+    crate::env::set_var("JCODE_HOOKS_DISABLED", "1");
+    for streaming in [false, true] {
+        for persist in [false, true] {
+            for late in [false, true] {
+                crate::env::set_var("JCODE_PERSIST_MEMORY_INJECTIONS", persist.to_string());
+                crate::config::invalidate_config_cache();
+                let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let mut fixture = MemoryReplayProvider {
+                    requests: requests.clone(),
+                    late_session: None,
+                };
+                let provider: Arc<dyn Provider> = Arc::new(fixture.clone());
+                let registry = Registry::new(provider.clone()).await;
+                registry
+                    .register(
+                        "memory_fixture".into(),
+                        Arc::new(FakeMcpTool {
+                            name: "memory_fixture".into(),
+                        }),
+                    )
+                    .await;
+                let mut agent = Agent::new(provider, registry);
+                agent.memory_enabled = true;
+                agent.system_prompt_override = Some("local memory integration test".into());
+                agent.add_message(Role::User, Message::user("run the fixture").content);
+                agent.begin_model_usage_turn("replay");
+                let sid = agent.session.id.clone();
+                let turn = agent.model_usage_turn_id();
+                crate::memory::begin_turn_memory(&sid, &turn);
+                if late {
+                    fixture.late_session = Some(sid.clone());
+                    agent.provider = Arc::new(fixture);
+                } else {
+                    crate::memory::complete_turn_memory(&sid, &turn, Some(replay_fixture()));
+                }
+                let mut injected_events = 0;
+                if streaming {
+                    let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+                    agent.run_turn_streaming_mpsc(tx).await.unwrap();
+                    while let Ok(event) = rx.try_recv() {
+                        if matches!(event, ServerEvent::MemoryInjected { .. }) {
+                            injected_events += 1;
+                        }
+                    }
+                    assert_eq!(injected_events, 1, "only one UI delivery acknowledgement");
+                } else {
+                    agent.run_turn(false).await.unwrap();
+                }
+                let captured = requests.lock().unwrap();
+                assert_eq!(
+                    captured.len(),
+                    3,
+                    "two real tool executions and a final response"
+                );
+                for (index, request) in captured.iter().enumerate() {
+                    let count = request
+                        .iter()
+                        .filter(|message| message_text(message).contains("turn-replay-canary"))
+                        .count();
+                    assert_eq!(
+                        count,
+                        usize::from(!late || index > 0),
+                        "streaming={streaming} persist={persist} late={late} round={index}"
+                    );
+                }
+                let stored = agent
+                    .session
+                    .messages
+                    .iter()
+                    .filter(|message| content_text(&message.content).contains("turn-replay-canary"))
+                    .count();
+                assert_eq!(
+                    stored,
+                    usize::from(persist),
+                    "persistence must not duplicate per continuation"
+                );
+                assert!(!crate::memory::read_turn_memory(&sid, &turn).first_delivery);
+                agent.set_memory_enabled(false);
+                assert!(!crate::memory::complete_turn_memory(
+                    &sid,
+                    &turn,
+                    Some(replay_fixture())
+                ));
+            }
+        }
+    }
+    for (name, value) in [
+        ("JCODE_PERSIST_MEMORY_INJECTIONS", old_persist),
+        ("JCODE_HOOKS_DISABLED", old_hooks),
+    ] {
+        match value {
+            Some(value) => crate::env::set_var(name, value),
+            None => crate::env::remove_var(name),
+        }
+    }
+    crate::config::invalidate_config_cache();
 }
 
 #[tokio::test]

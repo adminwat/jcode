@@ -17,34 +17,17 @@ impl Agent {
         ));
     }
 
-    pub(super) fn build_memory_prompt_nonblocking_shared(
-        &self,
+    pub(super) async fn build_turn_memory_prompt(
+        &mut self,
         messages: std::sync::Arc<[Message]>,
-        _memory_event_tx: Option<crate::memory::MemoryEventSink>,
-    ) -> Option<crate::memory::PendingMemory> {
+    ) -> crate::memory::TurnMemoryResult {
         if !self.memory_enabled {
-            return None;
+            return Default::default();
         }
-
+        let turn_id = self.model_usage_turn_id();
         let session_id = &self.session.id;
-
-        let fresh_user_turn = crate::message::ends_with_fresh_user_turn(&messages);
-        let pending = if fresh_user_turn {
-            crate::memory::take_pending_memory(session_id)
-        } else {
-            None
-        };
-
-        // Use the persistent memory-agent pipeline as the single source of truth.
-        // Running both this and the legacy MemoryManager background retrieval path
-        // can prepare overlapping pending prompts for the same turn, which makes
-        // memory injection feel overly aggressive.
-        // Relevance results are consumed only at the start of a fresh user turn.
-        // Enqueuing again after every tool result runs the local embedding model
-        // for each provider continuation without creating an additional injection
-        // opportunity. One update per user turn keeps memory current while avoiding
-        // redundant 512-token inference during tool-heavy agent loops.
-        if fresh_user_turn {
+        let started = crate::memory::begin_turn_memory(session_id, &turn_id);
+        if started {
             crate::memory_agent::update_context_sync_with_dir(
                 session_id,
                 messages,
@@ -52,7 +35,54 @@ impl Agent {
             );
         }
 
-        pending
+        // Only the initial request waits. Slow retrieval can still reach a later
+        // continuation, but can never be borrowed by the next user turn.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(750);
+        loop {
+            let result = crate::memory::read_turn_memory(session_id, &turn_id);
+            if result.ready || !started {
+                return result;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                logging::info(&format!(
+                    "MEMORY_DELIVERY_DEADLINE session={} turn={} wait_ms=750",
+                    session_id, turn_id
+                ));
+                return result;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    pub(super) fn prepare_turn_memory_injection(
+        &mut self,
+        result: &crate::memory::TurnMemoryResult,
+        messages: &[Message],
+    ) -> Option<(Message, bool)> {
+        let memory = result.memory.as_ref()?;
+        if result.first_delivery {
+            let count = memory.count.max(1);
+            let age_ms = memory.computed_at.elapsed().as_millis() as u64;
+            crate::memory::record_injected_prompt(&memory.prompt, count, age_ms);
+            crate::memory_log::log_pending_consumed(
+                &self.session.id,
+                count,
+                age_ms,
+                memory.prompt.len(),
+            );
+            self.record_memory_injection_in_session(memory);
+        }
+        let expected = format!("<system-reminder>\n{}\n</system-reminder>", memory.prompt);
+        if messages.iter().any(|message| {
+            message.role == crate::message::Role::User
+                && matches!(message.content.as_slice(),
+                    [crate::message::ContentBlock::Text { text, .. }] if text == &expected)
+        }) {
+            // Persisted memory is already present. If compaction removes it,
+            // the next request will reinsert it instead of losing the context.
+            return None;
+        }
+        Some(self.prepare_memory_injection_message(memory))
     }
 
     fn append_current_turn_system_reminder(&self, split: &mut crate::prompt::SplitSystemPrompt) {
@@ -125,13 +155,15 @@ impl Agent {
         split
     }
 
-    /// Non-blocking memory prompt - takes pending result and spawns check for next turn
+    /// Test wrapper around the same bounded delivery path used by both loops.
     #[cfg(test)]
-    pub(super) fn build_memory_prompt_nonblocking(
-        &self,
+    pub(super) async fn build_memory_prompt_nonblocking(
+        &mut self,
         messages: &[Message],
         _memory_event_tx: Option<crate::memory::MemoryEventSink>,
     ) -> Option<crate::memory::PendingMemory> {
-        self.build_memory_prompt_nonblocking_shared(messages.to_vec().into(), _memory_event_tx)
+        self.build_turn_memory_prompt(messages.to_vec().into())
+            .await
+            .memory
     }
 }
