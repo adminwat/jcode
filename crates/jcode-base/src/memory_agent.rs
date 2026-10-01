@@ -39,7 +39,225 @@ struct RetrievalContext {
 const CONTEXT_CHANNEL_CAPACITY: usize = 16;
 
 /// Similarity threshold for topic change detection (lower = more different)
-const TOPIC_CHANGE_THRESHOLD: f32 = 0.3;
+pub const TOPIC_CHANGE_THRESHOLD: f32 = 0.3;
+
+/// Minimum turns before we consider extracting on topic change
+pub const MIN_TURNS_FOR_EXTRACTION: usize = 4;
+
+/// Trigger a periodic incremental extraction every N turns, even without a topic change.
+/// This ensures memories are captured during long single-topic sessions.
+pub const PERIODIC_EXTRACTION_INTERVAL: usize = 12;
+
+static SESSION_TOPIC_CHANGED: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+pub fn record_session_topic_change(session_id: &str) {
+    if let Ok(mut set) = SESSION_TOPIC_CHANGED.lock() {
+        set.insert(session_id.to_string());
+    }
+}
+
+pub fn take_session_topic_change(session_id: &str) -> bool {
+    SESSION_TOPIC_CHANGED
+        .lock()
+        .map(|mut set| set.remove(session_id))
+        .unwrap_or(false)
+}
+
+pub fn is_anchor_probe_or_synthetic(anchor: &crate::session::StoredMessage) -> bool {
+    if anchor.display_role.is_some() {
+        return true;
+    }
+    let user_text: Vec<&str> = anchor
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            crate::message::ContentBlock::Text { text, .. } => {
+                let trimmed = text.trim_start();
+                if trimmed.starts_with("<system-reminder>")
+                    || trimmed.starts_with("[System reminder:")
+                    || trimmed.starts_with("[NOTIFICATION]")
+                {
+                    None
+                } else {
+                    Some(text.as_str())
+                }
+            }
+            _ => None,
+        })
+        .collect();
+
+    if user_text.is_empty() {
+        return true;
+    }
+
+    let normalized = user_text
+        .join(" ")
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    matches!(
+        normalized.as_str(),
+        "ok" | "okay"
+            | "thanks"
+            | "thank you"
+            | "ok thanks"
+            | "say only ok"
+            | "reply only ok"
+            | "respond only ok"
+    )
+}
+
+/// Owner-bound cadence tracking for native memory extraction.
+/// Completed logical turns increment the cadence counter; probes, empty contexts,
+/// and continuation tool loops in the same turn are deduplicated.
+/// Triggers extraction on topic-change (>= 4 turns) or periodic interval (every 12 turns).
+#[derive(Debug, Clone, Default)]
+pub struct ExtractionCadence {
+    turns_since_extraction: usize,
+    last_turn_id: Option<String>,
+    session_id: Option<String>,
+}
+
+impl ExtractionCadence {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn reset(&mut self) {
+        self.turns_since_extraction = 0;
+        self.last_turn_id = None;
+        self.session_id = None;
+    }
+
+    pub fn turns_since_extraction(&self) -> usize {
+        self.turns_since_extraction
+    }
+
+    pub fn last_turn_id(&self) -> Option<&str> {
+        self.last_turn_id.as_deref()
+    }
+
+    pub fn step_turn(&mut self, turn_id: Option<&str>, is_probe: bool, transcript: &str) -> bool {
+        if is_probe || transcript.is_empty() {
+            return false;
+        }
+        let Some(turn_id) = turn_id else {
+            return false;
+        };
+        if self.last_turn_id.as_deref() == Some(turn_id) {
+            return false;
+        }
+        self.last_turn_id = Some(turn_id.to_string());
+        self.turns_since_extraction += 1;
+        true
+    }
+
+    pub fn take_periodic_due(&mut self, transcript: &str) -> bool {
+        if self.turns_since_extraction >= PERIODIC_EXTRACTION_INTERVAL && transcript.len() >= 200 {
+            self.turns_since_extraction = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn take_topic_change_due(&mut self, transcript: &str) -> bool {
+        if self.turns_since_extraction >= MIN_TURNS_FOR_EXTRACTION && transcript.len() >= 200 {
+            self.turns_since_extraction = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn complete(
+        &mut self,
+        session: &crate::session::Session,
+        provider: Option<Arc<dyn crate::provider::Provider>>,
+    ) -> usize {
+        // Short-circuit extraction opt-out before any work
+        let config = crate::config::config();
+        if !config.agents.memory_extraction_enabled.unwrap_or(config.agents.memory_sidecar_enabled) {
+            return 0;
+        }
+
+        // Auto-reset if session ID changed
+        if self.session_id.as_deref() != Some(session.id.as_str()) {
+            self.reset();
+            self.session_id = Some(session.id.clone());
+        }
+
+        // Reject missing or foreign anchors
+        let Some(turn_id) = &session.model_usage_turn_id else {
+            return 0;
+        };
+        let Some(anchor_id) = turn_id.strip_prefix(&format!("{}:", session.id)) else {
+            return 0;
+        };
+        let Some(anchor) = session.messages.iter().find(|m| m.id == anchor_id) else {
+            return 0;
+        };
+        if anchor.role != crate::message::Role::User || anchor.display_role.is_some() {
+            return 0;
+        }
+        if is_anchor_probe_or_synthetic(anchor) {
+            return 0;
+        }
+
+        // Continuation deduplication
+        if self.last_turn_id.as_deref() == Some(turn_id.as_str()) {
+            return 0;
+        }
+        self.last_turn_id = Some(turn_id.clone());
+        self.turns_since_extraction += 1;
+
+        let messages: Vec<_> = session
+            .messages
+            .iter()
+            .filter(|m| m.display_role.is_none())
+            .map(|m| m.to_message())
+            .collect();
+        let transcript = build_transcript_for_extraction(&messages);
+        if transcript.is_empty() {
+            return 0;
+        }
+
+        let topic_changed = take_session_topic_change(&session.id);
+        if topic_changed && self.turns_since_extraction >= MIN_TURNS_FOR_EXTRACTION && transcript.len() >= 200 {
+            crate::logging::info(&format!(
+                "[{}] ExtractionCadence: Topic change extraction ({} turns since last)",
+                session.id, self.turns_since_extraction
+            ));
+            self.turns_since_extraction = 0;
+            extract_and_store(
+                &transcript,
+                &session.id,
+                session.working_dir.as_deref(),
+                provider.as_ref().map(|p| p.fork()),
+            )
+            .await
+        } else if self.turns_since_extraction >= PERIODIC_EXTRACTION_INTERVAL && transcript.len() >= 200 {
+            crate::logging::info(&format!(
+                "[{}] ExtractionCadence: Periodic extraction ({} turns since last)",
+                session.id, self.turns_since_extraction
+            ));
+            self.turns_since_extraction = 0;
+            extract_and_store(
+                &transcript,
+                &session.id,
+                session.working_dir.as_deref(),
+                provider.as_ref().map(|p| p.fork()),
+            )
+            .await
+        } else {
+            0
+        }
+    }
+}
 
 /// Maximum memories to surface per turn
 const MAX_MEMORIES_PER_TURN: usize = 5;
@@ -365,13 +583,6 @@ mod turn_queue_tests {
     }
 }
 
-/// Minimum turns before we consider extracting on topic change
-const MIN_TURNS_FOR_EXTRACTION: usize = 4;
-
-/// Trigger a periodic incremental extraction every N turns, even without a topic change.
-/// This ensures memories are captured during long single-topic sessions.
-const PERIODIC_EXTRACTION_INTERVAL: usize = 12;
-
 /// Skip repeated relevance checks when the formatted context is unchanged.
 const RELEVANCE_CONTEXT_REPEAT_SUPPRESSION_SECS: u64 = 30;
 
@@ -602,13 +813,6 @@ impl MemoryAgent {
                 ss.last_extraction_turn = Some(key);
                 ss.turns_since_extraction += 1;
             }
-            if ss.turns_since_extraction >= PERIODIC_EXTRACTION_INTERVAL
-                && extraction_context.len() >= 200
-            {
-                ss.turns_since_extraction = 0;
-                self.extract_from_context(session_id, &extraction_context, "periodic")
-                    .await;
-            }
         }
         let memory_manager = self.manager_for_session(session_id);
         let context = memory::format_context_for_relevance(&messages);
@@ -722,25 +926,8 @@ impl MemoryAgent {
                         "new topic detected",
                     );
 
-                    // Extract memories from the PREVIOUS topic before moving on
-                    if ss.turns_since_extraction >= MIN_TURNS_FOR_EXTRACTION {
-                        if let Some(prev_context) = ss.last_context_string.clone() {
-                            crate::logging::info(&format!(
-                                "[{}] Triggering incremental extraction ({} turns since last)",
-                                session_id, ss.turns_since_extraction
-                            ));
-                            ss.turns_since_extraction = 0;
-                            let _ = ss;
-                            self.extract_from_context(session_id, &prev_context, "topic change")
-                                .await;
-                            let ss = self.session_state(session_id);
-                            ss.surfaced_memories.clear();
-                        } else {
-                            ss.surfaced_memories.clear();
-                        }
-                    } else {
-                        ss.surfaced_memories.clear();
-                    }
+                    record_session_topic_change(session_id);
+                    ss.surfaced_memories.clear();
                     // NOTE: injected-memory tracking is intentionally NOT
                     // cleared here. Topic changes fire frequently on real
                     // sessions (consecutive coding turns often drop below the
@@ -1084,6 +1271,7 @@ impl MemoryAgent {
     ///
     /// This is an incremental extraction - we extract from a portion of the
     /// conversation (on topic change or periodically) rather than waiting for session end.
+    #[allow(dead_code)]
     async fn extract_from_context(&self, session_id: &str, context: &str, reason: &str) {
         let sidecar = match crate::sidecar::Sidecar::for_extraction() {
             Ok(Some(sidecar)) => sidecar,

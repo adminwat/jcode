@@ -247,6 +247,8 @@ pub struct Agent {
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     external_turn_memory: Option<prompting::ExternalTurnMemory>,
+    /// Owner-bound cadence tracking for native memory extraction.
+    extraction_cadence: crate::memory_agent::ExtractionCadence,
     /// One-step undo snapshot captured before the most recent rewind.
     rewind_undo_snapshot: Option<RewindUndoSnapshot>,
     /// Channel for tools to request stdin input from the user
@@ -337,6 +339,7 @@ impl Agent {
             agents_md_snapshot,
             memory_enabled: crate::config::config().features.memory,
             external_turn_memory: None,
+            extraction_cadence: crate::memory_agent::ExtractionCadence::new(),
             rewind_undo_snapshot: None,
             stdin_request_tx: None,
             provider_runtime_state: ProviderRuntimeState::observed(initial_provider_model),
@@ -963,6 +966,10 @@ impl Agent {
 
     pub fn session_id(&self) -> &str {
         &self.session.id
+    }
+
+    pub fn extraction_cadence(&self) -> &crate::memory_agent::ExtractionCadence {
+        &self.extraction_cadence
     }
 
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {

@@ -224,6 +224,7 @@ impl App {
 
     pub(super) fn clear_provider_messages(&mut self) {
         self.clear_local_memory();
+        self.extraction_cadence.reset();
         self.session.model_usage_turn_id = None;
         self.messages.clear();
         self.last_injected_memory_signature = None;

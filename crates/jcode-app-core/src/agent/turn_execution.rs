@@ -23,6 +23,11 @@ impl Agent {
         self.fire_turn_start_hook("run");
         let result = self.run_turn(true).await.map(|_| ());
         self.fire_turn_end_hook(&result, started, start_message_index);
+        if result.is_ok() {
+            self.extraction_cadence
+                .complete(&self.session, Some(self.provider.clone()))
+                .await;
+        }
         result
     }
 
@@ -56,6 +61,11 @@ impl Agent {
         self.fire_turn_start_hook("capture");
         let result = self.run_turn(false).await;
         self.fire_turn_end_hook(&result, started, start_message_index);
+        if result.is_ok() {
+            self.extraction_cadence
+                .complete(&self.session, Some(self.provider.clone()))
+                .await;
+        }
         result
     }
 
@@ -113,6 +123,11 @@ impl Agent {
         let result = self.run_turn_streaming_mpsc(event_tx).await;
         self.current_turn_system_reminder = None;
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        if result.is_ok() {
+            self.extraction_cadence
+                .complete(&self.session, Some(self.provider.clone()))
+                .await;
+        }
         result
     }
 
@@ -217,6 +232,7 @@ impl Agent {
     /// Clear conversation history
     pub fn clear(&mut self) {
         crate::memory::clear_pending_memory(&self.session.id);
+        self.extraction_cadence.reset();
         let preserve_canary = self.session.is_canary;
         let preserve_testing_build = self.session.testing_build.clone();
         let preserve_debug = self.session.is_debug;
@@ -763,6 +779,7 @@ impl Agent {
 
         let mark_active_start = Instant::now();
         self.session.mark_active();
+        self.extraction_cadence.reset();
         self.begin_concurrency_tracking();
         let mark_active_ms = mark_active_start.elapsed().as_millis();
         self.sync_memory_dedup_state_from_session();

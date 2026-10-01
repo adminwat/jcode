@@ -335,6 +335,7 @@ impl App {
             self.provider_session_id = None;
             self.clear_local_memory();
             self.session = session;
+            self.extraction_cadence.reset();
             crate::memory::sync_injected_memories(
                 &self.session.id,
                 &self.session.injected_memory_ids(),

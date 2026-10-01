@@ -58,6 +58,7 @@ impl Agent {
             .session
             .messages
             .iter()
+            .filter(|m| m.display_role.is_none())
             .map(|m| m.to_message())
             .collect();
         crate::memory_agent::build_transcript_for_extraction(&messages)

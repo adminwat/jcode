@@ -238,6 +238,7 @@ async fn local_memory_request_late_delivery_and_lifecycle_reject_stale_results()
     for action in ["clear", "reset", "restore", "quit", "drop"] {
         let mut app = app().await;
         let turn = anchor(&mut app, "lifecycle memory question");
+        assert!(app.extraction_cadence.step_turn(Some(&turn), false, "source"));
         let sid = app.session.id.clone();
         crate::memory::begin_turn_memory(&sid, &turn);
         let (request, _) = app.prepare_local_memory_request(vec![]).await;
@@ -251,6 +252,7 @@ async fn local_memory_request_late_delivery_and_lifecycle_reject_stale_results()
             .prepare_local_memory_request(vec![Message::tool_result("id", "continuation", false)])
             .await;
         assert!(request_text(&request).contains("native-local-canary"));
+        assert_eq!(app.extraction_cadence.turns_since_extraction(), 1);
         match action {
             "clear" => app.clear_provider_messages(),
             "reset" => super::super::commands_review::reset_current_session(&mut app),
@@ -282,6 +284,10 @@ async fn local_memory_request_late_delivery_and_lifecycle_reject_stale_results()
             "{action}"
         );
         assert!(app.local_turn_memory.is_none(), "{action}");
+        if matches!(action, "clear" | "reset" | "restore") {
+            assert_eq!(app.extraction_cadence.turns_since_extraction(), 0, "{action}");
+            assert!(app.extraction_cadence.last_turn_id().is_none(), "{action}");
+        }
     }
 }
 
@@ -382,6 +388,172 @@ impl crate::tool::Tool for RetentionTool {
     }
 }
 
+struct CadenceProvider {
+    model: Mutex<String>,
+    extractions: Arc<Mutex<Vec<String>>>,
+}
+#[async_trait::async_trait]
+impl Provider for CadenceProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _: &[crate::message::ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        let text = if self.model() == "fixture:extractor" {
+            let transcript = messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .filter_map(|b| {
+                    if let ContentBlock::Text { text, .. } = b {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.extractions.lock().unwrap().push(transcript.clone());
+            let source = transcript
+                .lines()
+                .filter_map(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .find(|r| r["kind"] == "user")
+                .unwrap();
+            serde_json::json!({"category":"preference", "evidence_id":source["id"], "quote":source["text"]}).to_string()
+        } else {
+            "Assistant-only fabricated policy must never become evidence.".into()
+        };
+        Ok(Box::pin(futures::stream::iter([
+            Ok(crate::message::StreamEvent::TextDelta(text)),
+            Ok(crate::message::StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            }),
+        ])))
+    }
+    fn name(&self) -> &str {
+        "local-cadence-fixture"
+    }
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+    fn set_model(&self, model: &str) -> Result<()> {
+        anyhow::ensure!(model == "fixture:extractor", "unexpected extraction route");
+        *self.model.lock().unwrap() = model.into();
+        Ok(())
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            model: Mutex::new(self.model()),
+            extractions: self.extractions.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a persistent PTY for real local completion acceptance"]
+async fn local_turn_cadence_real_terminal() {
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let _env = HookEnv::new("");
+    let config_path = home.root().join("config.toml");
+    let config = "[agents]\nmemory_sidecar_enabled = false\nmemory_extraction_enabled = true\nmemory_extraction_model = 'fixture:extractor'\n";
+    std::fs::write(&config_path, config).unwrap();
+    crate::config::invalidate_config_cache();
+    let extractions = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn Provider> = Arc::new(CadenceProvider {
+        model: Mutex::new("coordinator".into()),
+        extractions: extractions.clone(),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut app = App::new_for_test_harness(provider.clone(), registry);
+    app.is_remote = false;
+    app.memory_enabled = false;
+    app.ambient_system_prompt = Some("isolated cadence acceptance".into());
+    app.session.working_dir = Some(home.root().to_string_lossy().into_owned());
+    let mut terminal = ratatui::Terminal::with_options(
+        ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
+        },
+    )
+    .unwrap();
+    crossterm::terminal::enable_raw_mode().unwrap();
+    struct Raw;
+    impl Drop for Raw {
+        fn drop(&mut self) {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+    let _raw = Raw;
+    let mut input = crossterm::event::EventStream::new();
+    for n in 0..12 {
+        app.input = format!(
+            "I prefer isolated databases and exact source evidence for durable memory, requirement {n}."
+        );
+        app.submit_input();
+        app.run_turn_interactive(&mut terminal, &mut input, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            extractions.lock().unwrap().len(),
+            usize::from(n == 11),
+            "completion {n}"
+        );
+        if n == 0 {
+            // Same anchor provider continuation must not count as a new human turn.
+            app.run_turn_interactive(&mut terminal, &mut input, None)
+                .await
+                .unwrap();
+            app.input = "Say only: OK".into();
+            app.submit_input();
+            app.run_turn_interactive(&mut terminal, &mut input, None)
+                .await
+                .unwrap();
+        }
+    }
+    assert_eq!(
+        provider.model(),
+        "coordinator",
+        "fork must isolate extraction routing"
+    );
+    let manager = crate::memory::MemoryManager::new()
+        .with_project_dir(home.root())
+        .with_skills(false);
+    let entries = manager.list_all().unwrap();
+    assert!(
+        entries.iter().any(|m| m.content.contains("requirement 0")),
+        "real extraction must persist attributed user evidence"
+    );
+    assert!(
+        !serde_json::to_string(&entries)
+            .unwrap()
+            .contains("fabricated policy")
+    );
+    assert!(!extractions.lock().unwrap()[0].contains("Say only"));
+    std::fs::write(
+        &config_path,
+        config.replace(
+            "memory_extraction_enabled = true",
+            "memory_extraction_enabled = false",
+        ),
+    )
+    .unwrap();
+    crate::config::invalidate_config_cache();
+    for n in 0..13 {
+        app.input =
+            format!("Disabled extraction must not invoke a provider for durable requirement {n}.");
+        app.submit_input();
+        app.run_turn_interactive(&mut terminal, &mut input, None)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        extractions.lock().unwrap().len(),
+        1,
+        "opt-out must make zero additional calls"
+    );
+}
+
 // Run under a persistent PTY with stdin kept open. An EOF-fed `script` sends a
 // cancellation event and does not exercise the provider/tool completion path.
 // This exercises the real terminal/provider/tool loop, not a copied completion helper.
@@ -471,7 +643,16 @@ os.close(fd)
             event["turn_id"],
             app.session.model_usage_turn_id.clone().unwrap()
         );
-        assert_eq!(event["status"], if index == 3 { "error" } else { "ok" }, "event={event}; display={:?}; source={:?}", app.display_messages.iter().map(|m| &m.content).collect::<Vec<_>>(), app.session.messages);
+        assert_eq!(
+            event["status"],
+            if index == 3 { "error" } else { "ok" },
+            "event={event}; display={:?}; source={:?}",
+            app.display_messages
+                .iter()
+                .map(|m| &m.content)
+                .collect::<Vec<_>>(),
+            app.session.messages
+        );
         let records: serde_json::Value =
             serde_json::from_str(event["turn_records_json"].as_str().unwrap()).unwrap();
         assert!(!records.to_string().contains("prior-turn-secret-canary"));

@@ -1276,6 +1276,7 @@ pub struct App {
     // Suppress duplicate memory injection messages for near-identical prompts.
     last_injected_memory_signature: Option<(String, Instant)>,
     local_turn_memory: Option<turn_memory::LocalTurnMemory>,
+    extraction_cadence: crate::memory_agent::ExtractionCadence,
     // Swarm feature toggle for this session
     swarm_enabled: bool,
     // Debug-only: force the inline swarm gallery active (bypasses spawn-mode

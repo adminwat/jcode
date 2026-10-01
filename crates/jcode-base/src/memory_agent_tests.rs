@@ -11,14 +11,38 @@ struct ExtractionProvider {
 impl crate::provider::Provider for ExtractionProvider {
     async fn complete(
         &self,
-        _messages: &[crate::message::Message],
+        messages: &[crate::message::Message],
         _tools: &[crate::message::ToolDefinition],
         _system: &str,
         _resume: Option<&str>,
     ) -> Result<crate::provider::EventStream> {
         assert_eq!(self.model(), "test-profile:extractor");
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let reply = self.reply.clone();
+        let mut reply = self.reply.clone();
+        for m in messages {
+            for b in &m.content {
+                if let crate::message::ContentBlock::Text { text, .. } = b {
+                    for line in text.lines() {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                            if val.get("kind").and_then(|k| k.as_str()) == Some("tool_result") {
+                                if let (Some(id), Some(t)) = (
+                                    val.get("id").and_then(|i| i.as_str()),
+                                    val.get("text").and_then(|t| t.as_str()),
+                                ) {
+                                    reply = serde_json::json!({
+                                        "category": "fact",
+                                        "evidence_id": id,
+                                        "quote": t,
+                                    })
+                                    .to_string();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Ok(Box::pin(futures::stream::once(async move {
             Ok(jcode_message_types::StreamEvent::TextDelta(reply))
         })))
@@ -49,10 +73,23 @@ fn extraction_persists_without_relevance_and_replays_idempotently() {
     std::fs::write(&config, "[agents]\nmemory_sidecar_enabled = false\nmemory_extraction_enabled = true\nmemory_extraction_model = 'test-profile:extractor'\n").unwrap();
     crate::config::invalidate_config_cache();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let messages: Arc<[_]> = vec![crate::message::Message::tool_result(
-            "check", "Verified the temporary test database is reachable and its schema matches the expected migration version.", false,
-        )].into();
-        let transcript = memory::format_context_for_extraction(&messages);
+        let mut session = crate::session::Session::create(None, None);
+        session.id = "extraction-session-with-full-identity".to_string();
+        session.working_dir = None;
+        session.add_message(crate::message::Role::User, vec![crate::message::ContentBlock::ToolResult {
+            tool_use_id: "check".into(),
+            content: "Verified the temporary test database is reachable and its schema matches the expected migration version.".into(),
+            is_error: Some(false),
+        }]);
+        let mut cadence = ExtractionCadence::new();
+        let transcript = build_transcript_for_extraction(
+            &session
+                .messages
+                .iter()
+                .filter(|m| m.display_role.is_none())
+                .map(|m| m.to_message())
+                .collect::<Vec<_>>(),
+        );
         let evidence: serde_json::Value = serde_json::from_str(transcript.lines().next().unwrap()).unwrap();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let _provider = crate::provider::TestActiveProvider::install(Arc::new(ExtractionProvider {
@@ -60,16 +97,21 @@ fn extraction_persists_without_relevance_and_replays_idempotently() {
             calls: calls.clone(),
             reply: serde_json::json!({"category":"fact", "evidence_id":evidence["id"], "quote":evidence["text"]}).to_string(),
         }));
-        let (_, rx) = mpsc::channel(1);
-        let mut agent = MemoryAgent::new(rx);
+        let provider = crate::provider::active_provider_fork().unwrap();
         let manager = MemoryManager::new().with_skills(false);
+        let messages: Arc<[_]> = session.messages.iter().map(|m| m.to_message()).collect::<Vec<_>>().into();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             assert!(!memory::memory_llm_judge_available(), "the relevance judge must be disabled in this test");
             assert!(memory::format_context_for_relevance(&messages).is_empty());
             for turn in 0..PERIODIC_EXTRACTION_INTERVAL {
+                let turn_anchor = session.add_message(crate::message::Role::User, vec![crate::message::ContentBlock::Text {
+                    text: format!("Step {turn} please verify migration"),
+                    cache_control: None,
+                }]);
+                session.model_usage_turn_id = Some(format!("{}:{turn_anchor}", session.id));
                 for _ in 0..3 {
-                    agent.process_context("extraction-session-with-full-identity", Some(&turn.to_string()), messages.clone(), Instant::now()).await.unwrap();
+                    cadence.complete(&session, Some(provider.clone())).await;
                 }
             }
             tokio::time::timeout(std::time::Duration::from_secs(2), async {

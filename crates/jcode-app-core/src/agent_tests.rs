@@ -2889,3 +2889,259 @@ os.close(fd)
         }
     }
 }
+
+use std::sync::atomic::Ordering;
+
+struct AgentCadenceExtractionProvider {
+    model: std::sync::Mutex<String>,
+    regular_calls: Arc<std::sync::atomic::AtomicUsize>,
+    extraction_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for AgentCadenceExtractionProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume: Option<&str>,
+    ) -> Result<EventStream> {
+        let current_model = self.model();
+        if current_model == "test-profile:extractor" {
+            self.extraction_calls.fetch_add(1, Ordering::SeqCst);
+            // Parse JSON lines from the transcript in the user prompt
+            let user_prompt = messages
+                .iter()
+                .filter_map(|m| {
+                    if m.role == Role::User {
+                        m.content.iter().find_map(|b| match b {
+                            ContentBlock::Text { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .last()
+                .unwrap_or_default();
+
+            let mut reply_json = serde_json::json!({});
+            for line in user_prompt.lines() {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                    if val.get("kind").and_then(|k| k.as_str()) == Some("tool_result") {
+                        if let (Some(id), Some(text)) = (
+                            val.get("id").and_then(|i| i.as_str()),
+                            val.get("text").and_then(|t| t.as_str()),
+                        ) {
+                            reply_json = serde_json::json!({
+                                "category": "fact",
+                                "evidence_id": id,
+                                "quote": text,
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let events = vec![
+                StreamEvent::TextDelta(reply_json.to_string()),
+                StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".into()),
+                },
+            ];
+            return Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))));
+        }
+
+        self.regular_calls.fetch_add(1, Ordering::SeqCst);
+        let events = vec![
+            StreamEvent::TextDelta("Processed turn reply.".into()),
+            StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            },
+        ];
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+    fn name(&self) -> &str {
+        "agent-cadence-test"
+    }
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+    fn set_model(&self, model: &str) -> Result<()> {
+        anyhow::ensure!(model == "test-profile:extractor", "unknown route: {model}");
+        *self.model.lock().unwrap() = model.into();
+        Ok(())
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            model: std::sync::Mutex::new(self.model()),
+            regular_calls: self.regular_calls.clone(),
+            extraction_calls: self.extraction_calls.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn actual_agent_completed_turn_cadence_with_disabled_recall_and_owning_route() {
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let config = home.root().join("config.toml");
+    std::fs::write(
+        &config,
+        "[agents]\nmemory_sidecar_enabled = false\nmemory_extraction_enabled = true\nmemory_extraction_model = 'test-profile:extractor'\n",
+    )
+    .unwrap();
+    crate::config::invalidate_config_cache();
+
+    let extraction_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let regular_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let provider: Arc<dyn Provider> = Arc::new(AgentCadenceExtractionProvider {
+        model: std::sync::Mutex::new("coordinator".into()),
+        regular_calls: regular_calls.clone(),
+        extraction_calls: extraction_calls.clone(),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider.clone(), registry);
+    agent.set_memory_enabled(false);
+    assert!(!agent.memory_enabled, "recall must be disabled in this test");
+
+    // Add a rich tool result so transcript is >= 200 chars
+    let tool_output_text = "Database migration completed and verified in isolated test environment. All 42 tables present with expected schema version 20261001.";
+    agent.session.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "check-migration".into(),
+            content: tool_output_text.into(),
+            is_error: Some(false),
+        }],
+    );
+
+    // Turn 1: run_once
+    agent.run_once("Step 1: run initial check").await.unwrap();
+    assert_eq!(agent.extraction_cadence().turns_since_extraction(), 1);
+    assert_eq!(extraction_calls.load(Ordering::SeqCst), 0);
+
+    // Continuation of Turn 1 with same anchor: must NOT advance cadence
+    agent.run_once_capture("").await.unwrap();
+    assert_eq!(
+        agent.extraction_cadence().turns_since_extraction(),
+        1,
+        "continuation with same anchor must not advance cadence"
+    );
+
+    // Probe turn: run_once with "Say only: OK" must NOT increment cadence
+    agent.run_once("Say only: OK").await.unwrap();
+    assert_eq!(
+        agent.extraction_cadence().turns_since_extraction(),
+        1,
+        "probe turn must not advance cadence"
+    );
+    assert_eq!(extraction_calls.load(Ordering::SeqCst), 0);
+
+    // Run turns 2..11 using different modes (capture, streaming, plain)
+    for i in 2..12 {
+        if i % 3 == 0 {
+            agent
+                .run_once_capture(&format!("Step {i}: capture action"))
+                .await
+                .unwrap();
+        } else if i % 3 == 1 {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            agent
+                .run_once_streaming_mpsc(&format!("Step {i}: stream action"), vec![], None, tx)
+                .await
+                .unwrap();
+        } else {
+            agent
+                .run_once(&format!("Step {i}: plain action"))
+                .await
+                .unwrap();
+        }
+        assert_eq!(agent.extraction_cadence().turns_since_extraction(), i);
+        assert_eq!(extraction_calls.load(Ordering::SeqCst), 0);
+    }
+
+    // Turn 12: triggers periodic extraction on completed turn!
+    agent
+        .run_once("Step 12: trigger periodic extraction boundary")
+        .await
+        .unwrap();
+    assert_eq!(
+        agent.extraction_cadence().turns_since_extraction(),
+        0,
+        "cadence counter must reset to 0 after extraction"
+    );
+    assert_eq!(
+        extraction_calls.load(Ordering::SeqCst),
+        1,
+        "periodic extraction must run via owning provider fork"
+    );
+
+    // Coordinator model must remain unchanged!
+    assert_eq!(
+        agent.provider.model(),
+        "coordinator",
+        "agent owning provider model must remain unchanged"
+    );
+
+    // Verify persisted memory in MemoryManager
+    let manager = crate::memory::MemoryManager::new()
+        .with_skills(false)
+        .with_project_dir(agent.working_dir().unwrap());
+    let entries = manager.list_all().unwrap();
+    assert_eq!(entries.len(), 1, "extracted memory must be persisted in storage");
+    assert_eq!(
+        entries[0].content,
+        format!("Tool reported: {}", tool_output_text),
+        "persisted memory must match grounded evidence"
+    );
+
+    // Extraction opt-out test: set memory_extraction_enabled = false
+    std::fs::write(&config, "[agents]\nmemory_extraction_enabled = false\n").unwrap();
+    crate::config::invalidate_config_cache();
+
+    for i in 1..=13 {
+        agent.run_once(&format!("Disabled step {i}")).await.unwrap();
+    }
+    assert_eq!(
+        extraction_calls.load(Ordering::SeqCst),
+        1,
+        "extraction disabled must make 0 provider calls"
+    );
+}
+
+#[tokio::test]
+async fn actual_agent_cadence_session_reset_isolation() {
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let config = home.root().join("config.toml");
+    std::fs::write(
+        &config,
+        "[agents]\nmemory_sidecar_enabled = false\nmemory_extraction_enabled = true\nmemory_extraction_model = 'test-profile:extractor'\n",
+    )
+    .unwrap();
+    crate::config::invalidate_config_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(AgentCadenceExtractionProvider {
+        model: std::sync::Mutex::new("coordinator".into()),
+        regular_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        extraction_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.set_memory_enabled(false);
+
+    for i in 1..=5 {
+        agent.run_once(&format!("Step {i}")).await.unwrap();
+    }
+    assert_eq!(agent.extraction_cadence().turns_since_extraction(), 5);
+
+    // Clear session: cadence must reset
+    agent.clear();
+    assert_eq!(
+        agent.extraction_cadence().turns_since_extraction(),
+        0,
+        "agent.clear() must reset extraction cadence"
+    );
+}

@@ -43,6 +43,11 @@ impl App {
             started,
             result.as_ref().err().map(ToString::to_string),
         );
+        if matches!(result, Ok(true)) && !self.is_remote {
+            self.extraction_cadence
+                .complete(&self.session, Some(self.provider.clone()))
+                .await;
+        }
         result.map(|_| ())
     }
 
