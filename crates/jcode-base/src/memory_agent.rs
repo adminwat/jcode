@@ -44,20 +44,8 @@ const TOPIC_CHANGE_THRESHOLD: f32 = 0.3;
 /// Maximum memories to surface per turn
 const MAX_MEMORIES_PER_TURN: usize = 5;
 
-/// Dynamic no-sidecar gate tunables (variable-k surfacing without an LLM).
-///
-/// When the memory sidecar is disabled (no LLM to judge relevance), we used to
-/// blindly pad the hybrid top-5 every turn, which injected ~5 memories even on
-/// turns that needed none. Instead we keep a score-relative window: always keep
-/// the top candidate, then keep each following candidate only while its hybrid
-/// score stays within `GATE_REL_FLOOR` of the top AND within `GATE_DROP_RATIO`
-/// of the previous kept score. The first big gap cuts the tail. This injects a
-/// VARIABLE count (1..=MAX_MEMORIES_PER_TURN) instead of a fixed 5.
-///
-/// Bench (self-dev corpus, 150 query windows): precision@5 0.23 -> 0.36 (+56%),
-/// avg injected 5.0 -> ~2.25/turn, at zero added cost. Note this cannot drop to
-/// 0 on no-memory turns (cosdiag proved no zero-cost score separates them); the
-/// only lever for true 0-injection is the LLM precision rerank (sidecar mode).
+/// Relative RRF ranks only trim the tail AFTER query evidence is checked.
+/// They are not cosine similarities, probabilities, or factual confidence.
 const GATE_REL_FLOOR: f32 = 0.90;
 const GATE_DROP_RATIO: f32 = 0.95;
 
@@ -86,6 +74,24 @@ fn dynamic_gate_select(
         out.push((entry, sim));
     }
     out
+}
+
+/// Conservative, deterministic fallback. Require two distinct topic terms in
+/// the current query and memory content. This deliberately abstains on vague
+/// continuations and synonym-only matches instead of treating top rank as proof.
+fn query_terms(text: &str) -> HashSet<String> {
+    let words: String = text.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
+    crate::memory_types::collect_skill_query_terms(&words).into_iter()
+        .filter(|term| !matches!(term.as_str(), "please" | "implement" | "fully" | "continue" | "proceed" | "again" | "thanks"))
+        .collect()
+}
+
+fn query_supported_candidates(query: &str, candidates: Vec<(MemoryEntry, f32)>) -> Vec<(MemoryEntry, f32)> {
+    let terms = query_terms(query);
+    if terms.len() < 2 { return Vec::new(); }
+    candidates.into_iter().filter(|(entry, rank)| {
+        rank.is_finite() && *rank > 0.0 && terms.intersection(&query_terms(&entry.content)).take(2).count() == 2
+    }).collect()
 }
 
 /// Reset surfaced memories every N turns to allow re-surfacing
@@ -904,7 +910,7 @@ impl MemoryAgent {
                     // everything surfaced stays judge-backed. The failed attempt still
                     // advances the cadence, while the global circuit breaker suppresses
                     // cross-session retry storms.
-                    let carried = self.carry_verified(session_id, new_candidates);
+                    let carried = self.carry_verified(session_id, &focused_query, new_candidates);
                     crate::logging::event_rate_limited(
                         crate::logging::LogLevel::Info,
                         "memory_judge_failed_carry",
@@ -929,7 +935,7 @@ impl MemoryAgent {
                     session_id,
                     candidate_ids.len(),
                 );
-                let carried = self.carry_verified(session_id, new_candidates);
+                let carried = self.carry_verified(session_id, &focused_query, new_candidates);
                 crate::logging::info(&format!(
                     "[{}] Memory rerank gated by cadence; re-surfacing {} consensus-verified memories",
                     session_id,
@@ -948,7 +954,7 @@ impl MemoryAgent {
                 session_id,
                 candidate_ids.len(),
             );
-            self.select_top_candidates_no_sidecar(session_id, new_candidates)
+            self.select_top_candidates_no_sidecar(session_id, &focused_query, new_candidates)
         };
 
         let verified_ids: Vec<String> = relevant.iter().map(|e| e.id.clone()).collect();
@@ -1024,25 +1030,17 @@ impl MemoryAgent {
         Ok(())
     }
 
-    /// Mode-1 (no sidecar) candidate selection: a score-relative dynamic gate
-    /// over the hybrid-ranked candidates. Returns a VARIABLE number of memories
-    /// (1..=`MAX_MEMORIES_PER_TURN`) instead of always padding to a fixed top-k,
-    /// cutting the tail at the first large score gap. See `GATE_REL_FLOOR` /
-    /// `GATE_DROP_RATIO` for the rationale and benchmark numbers.
-    ///
-    /// In Mode-2 the listwise LLM reranker (`memory_rerank::rerank_candidates`)
-    /// handles relevance selection instead (and can drop to 0), so this is only
-    /// reached when the memory sidecar is disabled (no LLM available to judge
-    /// relevance) or on a cadence-gated turn.
+    /// Select query-supported memories, then trim their relative-rank tail.
     fn select_top_candidates_no_sidecar(
         &self,
         session_id: &str,
+        query: &str,
         candidates: Vec<(MemoryEntry, f32)>,
     ) -> Vec<MemoryEntry> {
-        let selected = dynamic_gate_select(candidates, MAX_MEMORIES_PER_TURN);
+        let selected = dynamic_gate_select(query_supported_candidates(query, candidates), MAX_MEMORIES_PER_TURN);
         for (entry, sim) in &selected {
             crate::logging::info(&format!(
-                "[{}] Memory relevant (semantic sim={:.2}): {}",
+                "[{}] Memory query-supported (rules fallback, RRF rank={:.5}): {}",
                 session_id,
                 sim,
                 jcode_core::util::truncate_str(&entry.content, 40)
@@ -1052,7 +1050,7 @@ impl MemoryAgent {
     }
 
     /// Re-surface ONLY the memories the last consensus rerank verified,
-    /// intersected with the current candidate set. Used both for cadence-gated
+    /// intersected with current query-supported candidates. Used both for cadence-gated
     /// turns and as the fallback when a judge fails this turn: in either case we
     /// ride the last judge verdict rather than dropping to unvetted hybrid order.
     /// No prior verdict (or no overlap) -> surface nothing. This keeps the LLM
@@ -1060,6 +1058,7 @@ impl MemoryAgent {
     fn carry_verified(
         &mut self,
         session_id: &str,
+        query: &str,
         candidates: Vec<(MemoryEntry, f32)>,
     ) -> Vec<MemoryEntry> {
         let verified: HashSet<String> = self
@@ -1068,7 +1067,7 @@ impl MemoryAgent {
             .iter()
             .cloned()
             .collect();
-        candidates
+        query_supported_candidates(query, candidates)
             .into_iter()
             .filter(|(e, _)| verified.contains(&e.id))
             .map(|(e, _)| e)
@@ -1345,14 +1344,13 @@ impl MemoryAgent {
     ///
     /// After serving memories, we can use the retrieval context to:
     /// 1. Create links between co-relevant memories
-    /// 2. Boost confidence for verified memories
-    /// 3. Decay confidence for rejected memories
-    /// 4. Log memory gaps for future learning
+    /// 2. Log memory gaps for future learning
+    /// Retrieval relevance is never evidence that a memory is true or false.
     async fn post_retrieval_maintenance(
         &self,
         memory_manager: MemoryManager,
         ctx: RetrievalContext,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         memory::set_state(MemoryState::Maintaining {
             phase: "graph upkeep".to_string(),
         });
@@ -1382,16 +1380,6 @@ impl MemoryAgent {
                         crate::logging::info(&format!("Link discovery failed: {}", e));
                     }
                 }
-            }
-
-            // 2 + 3. Batch confidence updates: boost verified, decay rejected.
-            // Each graph is loaded and saved ONCE for the whole turn instead of
-            // once per id (graphs are multi-MB JSON; per-id round trips rewrote
-            // megabytes 5-10x per turn).
-            let (boosted, decayed) =
-                apply_confidence_updates(&memory_manager, &ctx.verified_ids, &ctx.rejected_ids);
-            if boosted > 0 || decayed > 0 {
-                memory::add_event(MemoryEventKind::MaintenanceConfidence { boosted, decayed });
             }
 
             // 4. Gap detection: Log when we had no relevant memories
@@ -1454,16 +1442,16 @@ impl MemoryAgent {
             memory::pipeline_update(|p| {
                 p.maintain = StepStatus::Done;
                 p.maintain_result = Some(StepResult {
-                    summary: format!("{}L {}↑ {}↓ {}P", links, boosted, decayed, pruned),
+                    summary: format!("{}L {}P", links, pruned),
                     latency_ms,
                 });
             });
             memory::set_state(MemoryState::Idle);
             crate::logging::info(&format!(
-                "Memory maintenance complete: links={}, boosted={}, decayed={}, {}ms",
-                links, boosted, decayed, latency_ms
+                "Memory maintenance complete: links={}, pruned={}, {}ms",
+                links, pruned, latency_ms
             ));
-        });
+        })
     }
 }
 
@@ -1853,78 +1841,6 @@ async fn discover_links(manager: &MemoryManager, memory_ids: &[String]) -> Resul
     }
 
     Ok(linked)
-}
-
-/// Apply confidence boosts (verified) and decays (rejected) in a single pass
-/// over each graph. Loads and saves the project and global graphs at most ONCE
-/// each, instead of once per id, to avoid rewriting multi-MB JSON repeatedly.
-///
-/// Returns (boosted_count, decayed_count).
-fn apply_confidence_updates(
-    manager: &MemoryManager,
-    verified_ids: &[String],
-    rejected_ids: &[String],
-) -> (usize, usize) {
-    const BOOST: f32 = 0.05;
-    const DECAY: f32 = 0.02;
-
-    if verified_ids.is_empty() && rejected_ids.is_empty() {
-        return (0, 0);
-    }
-
-    let mut boosted = 0usize;
-    let mut decayed = 0usize;
-
-    // Process project then global; an id lives in exactly one graph, so once an
-    // update lands we don't need to touch it again.
-    for scope in ["project", "global"] {
-        let mut graph = match if scope == "project" {
-            manager.load_project_graph()
-        } else {
-            manager.load_global_graph()
-        } {
-            Ok(g) => g,
-            Err(e) => {
-                crate::logging::info(&format!(
-                    "Confidence update: failed to load {} graph: {}",
-                    scope, e
-                ));
-                continue;
-            }
-        };
-
-        let mut changed = false;
-        for id in verified_ids {
-            if let Some(entry) = graph.get_memory_mut(id) {
-                entry.boost_confidence(BOOST);
-                boosted += 1;
-                changed = true;
-            }
-        }
-        for id in rejected_ids {
-            if let Some(entry) = graph.get_memory_mut(id) {
-                entry.decay_confidence(DECAY);
-                decayed += 1;
-                changed = true;
-            }
-        }
-
-        if changed {
-            let saved = if scope == "project" {
-                manager.save_project_graph(&graph)
-            } else {
-                manager.save_global_graph(&graph)
-            };
-            if let Err(e) = saved {
-                crate::logging::info(&format!(
-                    "Confidence update: failed to save {} graph: {}",
-                    scope, e
-                ));
-            }
-        }
-    }
-
-    (boosted, decayed)
 }
 
 /// Initialize and start the global memory agent

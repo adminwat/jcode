@@ -69,7 +69,7 @@ fn apply_cluster_assignment_links_members() {
 }
 
 #[test]
-fn apply_confidence_updates_batches_boost_and_decay() {
+fn retrieval_maintenance_preserves_factual_confidence() {
     let _guard = crate::storage::lock_test_env();
     let old = std::env::var("JCODE_HOME").ok();
     let dir = std::env::temp_dir().join(format!(
@@ -107,21 +107,20 @@ fn apply_confidence_updates_batches_boost_and_decay() {
         let keep_before = conf_before(&keep);
         let stale_before = conf_before(&stale);
 
-        let (boosted, decayed) = apply_confidence_updates(
-            &manager,
-            std::slice::from_ref(&keep),
-            std::slice::from_ref(&stale),
-        );
-        assert_eq!(boosted, 1, "one verified memory boosted");
-        assert_eq!(decayed, 1, "one rejected memory decayed");
+        let (_, rx) = mpsc::channel(1);
+        let agent = MemoryAgent::new(rx);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            agent.post_retrieval_maintenance(manager.clone(), RetrievalContext {
+                verified_ids: vec![keep.clone()],
+                rejected_ids: vec![stale.clone()],
+                context_snippet: "retrieval relevance is not factual evidence".into(),
+            }).await.await.unwrap();
+        });
 
         let keep_after = conf_before(&keep);
         let stale_after = conf_before(&stale);
-        assert!(keep_after > keep_before, "verified confidence should rise");
-        assert!(
-            stale_after < stale_before,
-            "rejected confidence should fall"
-        );
+        assert_eq!(keep_after, keep_before, "relevance must not increase truth confidence");
+        assert_eq!(stale_after, stale_before, "irrelevance must not decrease truth confidence");
     }));
 
     match old {
@@ -167,6 +166,62 @@ fn hybrid_retrieval_uses_focused_query_with_empty_fallback() {
 
 fn mem(content: &str) -> MemoryEntry {
     MemoryEntry::new(MemoryCategory::Fact, content)
+}
+
+#[test]
+fn fallback_relevance_abstains_independently_of_rrf_scale() {
+    let (_, rx) = mpsc::channel(1);
+    let agent = MemoryAgent::new(rx);
+    for score in [0.00001, 0.0163, 0.99, 100.0] {
+        let result = agent.select_top_candidates_no_sidecar("test", "Fix native memory retrieval", vec![
+            (mem("Listmonk SMTP uses port 2587 with STARTTLS"), score),
+            (mem("Marketing campaigns use branded images"), score),
+        ]);
+        assert!(result.is_empty(), "relative rank {score} is not evidence of relevance");
+    }
+}
+
+#[test]
+fn fallback_relevance_keeps_supported_candidate_not_unrelated_top_hit() {
+    let (_, rx) = mpsc::channel(1);
+    let agent = MemoryAgent::new(rx);
+    let result = agent.select_top_candidates_no_sidecar("test", "Fix native memory retrieval!", vec![
+        (mem("SMTP port 2587"), 0.0163),
+        (mem("Native memory retrieval must survive tool continuations"), 0.0160),
+    ]);
+    assert_eq!(result.len(), 1);
+    assert!(result[0].content.starts_with("Native memory"));
+    for query in ["", "with this", "Implement fully", "memory memory", "smtp?"] {
+        let result = agent.select_top_candidates_no_sidecar("test", query, vec![
+            (mem("memory implement fully SMTP port 2587"), 0.0163),
+        ]);
+        assert!(result.is_empty(), "ambiguous query {query:?} must abstain");
+    }
+}
+
+#[test]
+fn fallback_relevance_requires_whole_terms_and_finite_positive_rank() {
+    let (_, rx) = mpsc::channel(1);
+    let agent = MemoryAgent::new(rx);
+    for score in [f32::NAN, f32::INFINITY, -0.1, 0.0] {
+        assert!(agent.select_top_candidates_no_sidecar("test", "native memory", vec![
+            (mem("native memory"), score),
+        ]).is_empty());
+    }
+    assert!(agent.select_top_candidates_no_sidecar("test", "native memory", vec![
+        (mem("natively memoryless"), 0.0163),
+    ]).is_empty());
+}
+
+#[test]
+fn carry_verified_requires_current_query_evidence() {
+    let (_, rx) = mpsc::channel(1);
+    let mut agent = MemoryAgent::new(rx);
+    let entry = mem("SMTP email uses port 2587");
+    agent.session_state("test").last_verified_ids = vec![entry.id.clone()];
+    assert!(agent.carry_verified("test", "native memory retrieval", vec![(entry.clone(), 0.0163)]).is_empty());
+    assert_eq!(agent.carry_verified("test", "SMTP email port", vec![(entry.clone(), 0.0163)]).len(), 1);
+    assert!(agent.carry_verified("other", "SMTP email port", vec![(entry, 0.0163)]).is_empty());
 }
 
 #[test]
