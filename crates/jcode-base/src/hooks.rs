@@ -26,7 +26,9 @@
 use std::path::PathBuf;
 
 mod turn_context;
+mod turn_records;
 pub use turn_context::{RetrievedMemory, run_turn_context};
+pub use turn_records::turn_records;
 
 tokio::task_local! {
     /// Terminal identity for the client whose request is currently executing.
@@ -181,23 +183,52 @@ fn payload_json(event: &HookEvent) -> String {
             serde_json::Value::String(value.clone()),
         );
     }
-    let payload = serde_json::Value::Object(map).to_string();
-    truncate_bytes(&payload, PAYLOAD_ENV_LIMIT).to_string()
+    let mut omitted = Vec::new();
+    loop {
+        let payload = serde_json::Value::Object(map.clone()).to_string();
+        if payload.len() <= PAYLOAD_ENV_LIMIT {
+            return payload;
+        }
+        // Drop whole fields, not JSON bytes or evidence fragments. Preserve the
+        // current-turn evidence and identifiers before legacy assistant prose.
+        let key = map
+            .iter()
+            .filter(|(key, _)| key.as_str() != "omitted_fields")
+            .max_by_key(|(key, value)| {
+                let priority = match key.as_str() {
+                    "event" | "session_id" | "turn_id" => 0,
+                    "turn_records_json" | "status" | "error" => 1,
+                    _ => 2,
+                };
+                (priority, value.to_string().len())
+            })
+            .map(|(key, _)| key.clone());
+        let Some(key) = key else {
+            return "{}".to_string();
+        };
+        map.remove(&key);
+        omitted.push(key);
+        map.insert("omitted_fields".to_string(), serde_json::json!(omitted));
+    }
 }
 
 fn apply_event_env(cmd: &mut std::process::Command, event: &HookEvent) {
     cmd.env("JCODE_HOOKS_DISABLED", "1");
-    cmd.env("JCODE_HOOK_EVENT", event.event);
-    if let Some(session_id) = &event.session_id {
-        cmd.env("JCODE_HOOK_SESSION_ID", session_id);
+    let payload = payload_json(event);
+    let selected: serde_json::Value =
+        serde_json::from_str(&payload).expect("bounded valid hook JSON");
+    for key in ["EVENT", "SESSION_ID", "CWD"]
+        .into_iter()
+        .chain(event.fields.iter().map(|(key, _)| *key))
+    {
+        let env_key = format!("JCODE_HOOK_{key}");
+        if let Some(value) = selected[key.to_ascii_lowercase()].as_str() {
+            cmd.env(env_key, value);
+        } else {
+            cmd.env_remove(env_key);
+        }
     }
-    if let Some(cwd) = &event.cwd {
-        cmd.env("JCODE_HOOK_CWD", cwd);
-    }
-    for (key, value) in &event.fields {
-        cmd.env(format!("JCODE_HOOK_{key}"), value);
-    }
-    cmd.env("JCODE_HOOK_PAYLOAD", payload_json(event));
+    cmd.env("JCODE_HOOK_PAYLOAD", payload);
 }
 
 fn build_hook_process(
@@ -399,6 +430,35 @@ mod tests {
         assert_eq!(payload["cwd"], "/work");
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["duration_ms"], "1200");
+    }
+
+    #[test]
+    fn retention_payload_omits_whole_fields_instead_of_invalid_json() {
+        let event = HookEvent::new("turn_end")
+            .session_id("full-session-identifier")
+            .field("TURN_ID", "full-session-identifier:full-turn-identifier")
+            .field("TURN_RECORDS_JSON", "{\"records\":[]}")
+            .field("LAST_ASSISTANT_TEXT", "é".repeat(PAYLOAD_ENV_LIMIT));
+        let raw = payload_json(&event);
+        assert!(raw.len() <= PAYLOAD_ENV_LIMIT);
+        let payload: serde_json::Value = serde_json::from_str(&raw).expect("valid bounded JSON");
+        assert_eq!(
+            payload["turn_id"],
+            "full-session-identifier:full-turn-identifier"
+        );
+        assert_eq!(payload["turn_records_json"], "{\"records\":[]}");
+        assert!(payload.get("last_assistant_text").is_none());
+        assert_eq!(
+            payload["omitted_fields"],
+            serde_json::json!(["last_assistant_text"])
+        );
+        let mut command = std::process::Command::new("true");
+        apply_event_env(&mut command, &event);
+        assert!(
+            !command
+                .get_envs()
+                .any(|(k, v)| k == "JCODE_HOOK_LAST_ASSISTANT_TEXT" && v.is_some())
+        );
     }
 
     #[test]

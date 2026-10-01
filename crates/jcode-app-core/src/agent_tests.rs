@@ -1340,6 +1340,16 @@ impl Provider for MemoryReplayProvider {
         _: &str,
         _: Option<&str>,
     ) -> Result<EventStream> {
+        if messages
+            .iter()
+            // Provider requests prepend UTC timestamps to user text.
+            .any(|m| {
+                m.role == Role::User
+                    && message_text(m).split_whitespace().last() == Some("retention-error-fixture")
+            })
+        {
+            return Err(anyhow::anyhow!("retention-provider-error-canary"));
+        }
         let call = {
             let mut requests = self.requests.lock().unwrap();
             requests.push(messages.to_vec());
@@ -2750,4 +2760,132 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
         text.contains("Reconsidered and completed safely"),
         "{text:?}"
     );
+}
+
+#[tokio::test]
+async fn retention_hooks_cover_blocking_capture_streaming_resume_and_error() {
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let script = home.root().join("retention-capture.py");
+    let calls = home.root().join("retention-calls.jsonl");
+    std::fs::write(&script, r#"import json, os, pathlib
+p = json.loads(os.environ['JCODE_HOOK_PAYLOAD'])
+p['env_turn_id'] = os.environ.get('JCODE_HOOK_TURN_ID')
+p['env_records'] = os.environ.get('JCODE_HOOK_TURN_RECORDS_JSON')
+fd = os.open(pathlib.Path(__file__).with_name('retention-calls.jsonl'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+os.write(fd, (json.dumps(p) + '\n').encode())
+os.close(fd)
+"#).unwrap();
+    let _env = ExternalHookTestEnv::new("");
+    crate::env::set_var(
+        "JCODE_HOOK_TURN_END",
+        format!("python3 {}", script.display()),
+    );
+    crate::config::invalidate_config_cache();
+    let mut expected_count = 0;
+    for mode in ["plain", "capture", "streaming"] {
+        let provider: Arc<dyn Provider> = Arc::new(MemoryReplayProvider {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            late_session: None,
+        });
+        let registry = Registry::new(provider.clone()).await;
+        registry
+            .register(
+                "memory_fixture".into(),
+                Arc::new(FakeMcpTool {
+                    name: "memory_fixture".into(),
+                }),
+            )
+            .await;
+        let mut agent = Agent::new(provider, registry);
+        agent.set_memory_enabled(false);
+        agent.system_prompt_override = Some("isolated retention fixture".into());
+        agent.add_message(
+            Role::User,
+            Message::user("prior-turn-secret-canary").content,
+        );
+        let mut first_turn = String::new();
+        for (index, query) in [
+            "Tests must use a temporary database.",
+            "",
+            "Say only: OK",
+            "retention-error-fixture",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let result = match mode {
+                "plain" => agent.run_once(query).await,
+                "capture" => agent.run_once_capture(query).await.map(|_| ()),
+                _ => {
+                    let (tx, _rx) = tokio_mpsc::unbounded_channel();
+                    agent.run_once_streaming_mpsc(query, vec![], None, tx).await
+                }
+            };
+            assert_eq!(result.is_err(), index == 3, "{mode} {index}: {result:?}");
+            expected_count += 1;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let events = loop {
+                let lines = std::fs::read_to_string(&calls).unwrap_or_default();
+                let events: Vec<serde_json::Value> = lines
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                if events.len() == expected_count {
+                    break events;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "missing {mode} turn_end {index}, found {}",
+                    events.len()
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            let event = events.last().unwrap();
+            let turn_id = agent.session.model_usage_turn_id.as_ref().unwrap();
+            assert_eq!(event["session_id"], agent.session.id);
+            assert_eq!(event["turn_id"], *turn_id);
+            assert_eq!(event["env_turn_id"], *turn_id);
+            if index == 0 {
+                first_turn = turn_id.clone();
+            }
+            if index == 1 {
+                assert_eq!(*turn_id, first_turn, "resume must retain intent anchor");
+            }
+            let records: serde_json::Value =
+                serde_json::from_str(event["turn_records_json"].as_str().unwrap()).unwrap();
+            assert_eq!(event["turn_records_json"], event["env_records"]);
+            assert_eq!(records["turn_id"], *turn_id);
+            assert!(!records.to_string().contains("prior-turn-secret-canary"));
+            if index < 2 {
+                assert_eq!(event["status"], "ok");
+                assert_eq!(
+                    records["records"][0]["text"],
+                    "Tests must use a temporary database."
+                );
+                for kind in ["user", "tool_call", "tool_result", "assistant_claim"] {
+                    assert!(
+                        records["records"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|r| r["kind"] == kind),
+                        "{mode} missing {kind}"
+                    );
+                }
+            } else if index == 2 {
+                assert_eq!(records["coverage"], "probe");
+                assert_eq!(records["records"], serde_json::json!([]));
+            } else {
+                assert_eq!(event["status"], "error");
+                assert!(
+                    event["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("retention-provider-error-canary")
+                );
+                assert_eq!(records["records"][0]["text"], "retention-error-fixture");
+                assert!(!records.to_string().contains("temporary database"));
+            }
+        }
+    }
 }

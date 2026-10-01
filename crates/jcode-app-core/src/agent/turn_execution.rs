@@ -18,8 +18,12 @@ impl Agent {
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
-        let _ = self.run_turn(true).await?;
-        Ok(())
+        let started = Instant::now();
+        let start_message_index = self.message_count();
+        self.fire_turn_start_hook("run");
+        let result = self.run_turn(true).await.map(|_| ());
+        self.fire_turn_end_hook(&result, started, start_message_index);
+        result
     }
 
     pub async fn run_once_capture(&mut self, user_message: &str) -> Result<String> {
@@ -47,7 +51,12 @@ impl Agent {
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
-        self.run_turn(false).await
+        let started = Instant::now();
+        let start_message_index = self.message_count();
+        self.fire_turn_start_hook("capture");
+        let result = self.run_turn(false).await;
+        self.fire_turn_end_hook(&result, started, start_message_index);
+        result
     }
 
     /// Run one conversation turn with streaming events via mpsc channel (per-client)
@@ -160,6 +169,9 @@ impl Agent {
             .session_id(self.session.id.clone())
             .field("MODEL", self.provider_model())
             .field("SOURCE", source.to_string());
+        if let Some(turn_id) = &self.session.model_usage_turn_id {
+            event = event.field("TURN_ID", turn_id);
+        }
         if let Some(cwd) = self.working_dir() {
             event = event.cwd(cwd);
         }
@@ -168,9 +180,9 @@ impl Agent {
 
     /// Fire the `turn_end` observer hook with turn outcome metadata.
     /// No-op (without building the payload) when the hook is not configured.
-    fn fire_turn_end_hook(
+    fn fire_turn_end_hook<T>(
         &self,
-        result: &Result<()>,
+        result: &Result<T>,
         started_at: Instant,
         start_message_index: usize,
     ) {
@@ -182,19 +194,22 @@ impl Agent {
             .session_id(self.session.id.clone())
             .field("STATUS", status)
             .field("DURATION_MS", started_at.elapsed().as_millis().to_string())
-            .field("MODEL", self.provider_model());
+            .field("MODEL", self.provider_model())
+            .field(
+                "TURN_RECORDS_JSON",
+                crate::hooks::turn_records(&self.session).to_string(),
+            );
+        if let Some(turn_id) = &self.session.model_usage_turn_id {
+            event = event.field("TURN_ID", turn_id);
+        }
         if let Some(cwd) = self.working_dir() {
             event = event.cwd(cwd);
         }
         if let Some(text) = self.latest_assistant_text_after(start_message_index) {
-            const LAST_TEXT_LIMIT: usize = 4000;
-            let snippet: String = text.chars().take(LAST_TEXT_LIMIT).collect();
-            event = event.field("LAST_ASSISTANT_TEXT", snippet);
+            event = event.field("LAST_ASSISTANT_TEXT", text);
         }
         if let Err(error) = result {
-            const ERROR_LIMIT: usize = 1000;
-            let message: String = error.to_string().chars().take(ERROR_LIMIT).collect();
-            event = event.field("ERROR", message);
+            event = event.field("ERROR", error.to_string());
         }
         crate::hooks::dispatch_observer(event);
     }
