@@ -390,6 +390,7 @@ pub fn clear_pending_memory(session_id: &str) {
 
 /// Clear all pending memory state across all sessions.
 pub fn clear_all_pending_memory() {
+    super::turn_memory::clear_all_turn_memory();
     if let Ok(mut guard) = PENDING_MEMORY.lock() {
         *guard = None;
     }

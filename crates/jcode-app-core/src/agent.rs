@@ -627,6 +627,7 @@ impl Agent {
     }
 
     fn reset_runtime_state_for_session_change(&mut self) {
+        crate::memory::clear_pending_memory(&self.session.id);
         self.active_skill = None;
         self.last_upstream_provider = None;
         self.last_connection_type = None;
@@ -970,6 +971,7 @@ impl Agent {
 
     /// Mark this agent session as closed and persist it.
     pub fn mark_closed(&mut self) {
+        crate::memory::clear_pending_memory(&self.session.id);
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_closed();
@@ -1002,6 +1004,7 @@ impl Agent {
     }
 
     pub fn mark_crashed(&mut self, message: Option<String>) {
+        crate::memory::clear_pending_memory(&self.session.id);
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_crashed(message);
@@ -1144,6 +1147,12 @@ impl Agent {
             }
         }
         md
+    }
+}
+
+impl Drop for Agent {
+    fn drop(&mut self) {
+        crate::memory::clear_pending_memory(&self.session.id);
     }
 }
 

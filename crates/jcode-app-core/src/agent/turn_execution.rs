@@ -201,6 +201,7 @@ impl Agent {
 
     /// Clear conversation history
     pub fn clear(&mut self) {
+        crate::memory::clear_pending_memory(&self.session.id);
         let preserve_canary = self.session.is_canary;
         let preserve_testing_build = self.session.testing_build.clone();
         let preserve_debug = self.session.is_debug;

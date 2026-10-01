@@ -1229,6 +1229,56 @@ struct MemoryReplayProvider {
     late_session: Option<String>,
 }
 
+#[tokio::test]
+async fn turn_memory_is_cleared_on_agent_lifecycle_changes() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    for action in [
+        "close",
+        "crash",
+        "clear",
+        "restore",
+        "drop",
+        "disable",
+        "clear_all",
+    ] {
+        let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let mut agent = Agent::new(provider, registry);
+        let sid = agent.session.id.clone();
+        crate::memory::begin_turn_memory(&sid, "old");
+        match action {
+            "close" => agent.mark_closed(),
+            "crash" => agent.mark_crashed(None),
+            "clear" => agent.clear(),
+            "restore" => {
+                let mut replacement = crate::session::Session::create(None, None);
+                replacement.saved = true;
+                replacement.save().unwrap();
+                crate::memory::begin_turn_memory(&replacement.id, "stale-restored");
+                agent.restore_session(&replacement.id).unwrap();
+                assert!(crate::memory::current_memory_turn(&replacement.id).is_none());
+                assert!(!crate::memory::complete_turn_memory(
+                    &replacement.id,
+                    "stale-restored",
+                    Some(replay_fixture())
+                ));
+            }
+            "drop" => drop(agent),
+            "disable" => agent.set_memory_enabled(false),
+            "clear_all" => crate::memory::clear_all_pending_memory(),
+            _ => unreachable!(),
+        }
+        assert!(
+            crate::memory::current_memory_turn(&sid).is_none(),
+            "{action}"
+        );
+        assert!(
+            !crate::memory::complete_turn_memory(&sid, "old", Some(replay_fixture())),
+            "{action}"
+        );
+    }
+}
+
 fn replay_fixture() -> crate::memory::PendingMemory {
     crate::memory::PendingMemory {
         prompt: "turn-replay-canary".into(),

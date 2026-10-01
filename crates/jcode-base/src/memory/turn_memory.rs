@@ -98,6 +98,12 @@ pub fn clear_turn_memory(session_id: &str) {
     }
 }
 
+pub(super) fn clear_all_turn_memory() {
+    if let Ok(mut turns) = TURNS.lock() {
+        turns.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
