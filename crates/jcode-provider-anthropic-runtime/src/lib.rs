@@ -1869,6 +1869,18 @@ async fn run_stream_with_retries(
                     continue;
                 }
 
+                // An account-scoped limit will not clear by retrying the same
+                // account. Stop immediately and tell the user how to switch.
+                if is_account_rate_limit_error(&error_str) {
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!(
+                            "Anthropic account rate limit reached. Retrying the same account will not help. Switch accounts with `/account switch <label>`, then retry.\n\n{}",
+                            e
+                        )))
+                        .await;
+                    return;
+                }
+
                 // Check if this is a transient/retryable error
                 if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
                     if saw_output {
@@ -2168,6 +2180,13 @@ async fn stream_response(
 }
 
 /// Check if an error is transient and should be retried
+fn is_account_rate_limit_error(error_str: &str) -> bool {
+    let normalized = error_str.to_lowercase().replace('’', "'");
+    normalized.contains("rate_limit_error")
+        && (normalized.contains("would exceed your account")
+            || normalized.contains("account's rate limit"))
+}
+
 fn is_retryable_error(error_str: &str) -> bool {
     jcode_provider_core::is_transient_transport_error(error_str)
         // Server errors (5xx)
