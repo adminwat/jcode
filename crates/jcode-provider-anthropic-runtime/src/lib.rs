@@ -1869,15 +1869,12 @@ async fn run_stream_with_retries(
                     continue;
                 }
 
-                // An account-scoped limit will not clear by retrying the same
-                // account. Stop immediately and tell the user how to switch.
+                // This account-scoped response is not a transient transport
+                // failure. Stop retrying this account, but preserve the
+                // original error so the outer provider failover layer can
+                // classify it and try another configured account.
                 if is_account_rate_limit_error(&error_str) {
-                    let _ = tx
-                        .send(Err(anyhow::anyhow!(
-                            "Anthropic account rate limit reached. Retrying the same account will not help. Switch accounts with `/account switch <label>`, then retry.\n\n{}",
-                            e
-                        )))
-                        .await;
+                    let _ = tx.send(Err(e)).await;
                     return;
                 }
 
