@@ -238,7 +238,7 @@ impl App {
             }
         }
         if let Some((message, _, _)) = external {
-            messages.push(message);
+            crate::memory::insert_external_turn_memory(&mut messages, &self.session, message);
         }
         (messages, split)
     }

@@ -150,21 +150,27 @@ print(json.dumps(dict(version=1,session_id=r['session_id'],turn_id=r['turn_id'],
         let turn = anchor(&mut app, query);
         crate::memory::begin_turn_memory(&app.session.id, &turn);
         crate::memory::complete_turn_memory(&app.session.id, &turn, None);
-        for _ in 0..3 {
-            let (request, split) = app
-                .prepare_local_memory_request(vec![Message::tool_result(
-                    "tool",
-                    "not a query",
-                    false,
-                )])
-                .await;
-            let text = request_text(&request);
-            assert_eq!(text.matches(&format!("external-local-{query}")).count(), 1);
-            if query == "second-question" {
-                assert!(!text.contains("external-local-first-question"));
+        for mut messages in [
+            app.session.visible_conversation_messages().into_iter()
+                .map(|message| message.to_message()).collect::<Vec<_>>(),
+            vec![Message::user("compacted summary without the original anchor")],
+        ] {
+            let (initial, _) = app.prepare_local_memory_request(messages.clone()).await;
+            for _ in 0..3 {
+                messages.push(Message::tool_result("tool", "not a query", false));
+                let (request, split) = app.prepare_local_memory_request(messages.clone()).await;
+                assert_eq!(
+                    request_text(&request[..initial.len()]), request_text(&initial),
+                    "external evidence must not move behind subsequent tool results",
+                );
+                let text = request_text(&request);
+                assert_eq!(text.matches(&format!("external-local-{query}")).count(), 1);
+                if query == "second-question" {
+                    assert!(!text.contains("external-local-first-question"));
+                }
+                assert!(!split.static_part.contains("external-local"));
+                assert!(!text.contains("question</system-reminder>"));
             }
-            assert!(!split.static_part.contains("external-local"));
-            assert!(!text.contains("question</system-reminder>"));
         }
     }
     assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 2);

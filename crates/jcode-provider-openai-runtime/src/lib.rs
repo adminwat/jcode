@@ -287,6 +287,9 @@ struct PersistentWsState {
     message_count: usize,
     /// Number of items we sent in the last full request (for detecting conversation changes)
     last_input_item_count: usize,
+    /// Fingerprint of the input prefix represented by the persistent response chain.
+    /// Positional slicing is unsafe when normalization reorders or removes items.
+    last_input_prefix_hash: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -404,6 +407,16 @@ fn summarize_ws_input(items: &[Value]) -> WsInputStats {
         }
     }
     stats
+}
+
+fn persistent_ws_input_prefix_hash(input: &[Value], count: usize) -> Option<u64> {
+    if count == 0 {
+        None
+    } else {
+        input
+            .get(..count)
+            .map(jcode_provider_core::fingerprint::stable_hash_json)
+    }
 }
 
 fn persistent_ws_incremental_items(input: &[Value], start_index: usize) -> (Vec<Value>, usize) {

@@ -570,6 +570,28 @@ async fn continue_persistent_ws_locked(
         return PersistentWsResult::NotAvailable;
     }
 
+    let current_prefix_hash = persistent_ws_input_prefix_hash(input, state.last_input_item_count);
+    if state.last_input_prefix_hash != current_prefix_hash {
+        let previous_prefix_hash = state.last_input_prefix_hash;
+        jcode_base::logging::info(&format!(
+            "Persistent WS input prefix changed ({previous_prefix_hash:?} != {current_prefix_hash:?}); reconnecting"
+        ));
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "input_prefix_changed".to_string()),
+                (
+                    "last_input_item_count",
+                    state.last_input_item_count.to_string(),
+                ),
+            ],
+        );
+        *guard = None;
+        return PersistentWsResult::NotAvailable;
+    }
+
     // Compute incremental items: everything after the last_input_item_count.
     //
     // When continuing with `previous_response_id`, OpenAI already has every
@@ -1073,6 +1095,7 @@ async fn continue_persistent_ws_locked(
     if let Some(resp_id) = new_response_id {
         state.last_response_id = resp_id;
         state.last_input_item_count = input_item_count;
+        state.last_input_prefix_hash = persistent_ws_input_prefix_hash(input, input_item_count);
         state.message_count += 1;
         state.last_activity_at = Instant::now();
         state.last_response_completed_at = Instant::now();
@@ -1242,6 +1265,10 @@ pub(super) async fn stream_response_websocket_persistent(
         .and_then(|value| value.as_array())
         .map(|items| summarize_ws_input(items))
         .unwrap_or_default();
+    let request_input_prefix_hash = request_event
+        .get("input")
+        .and_then(|value| value.as_array())
+        .and_then(|items| persistent_ws_input_prefix_hash(items, input_item_count));
 
     let request_text = serde_json::to_string(&request_event).map_err(|err| {
         OpenAIStreamFailure::Other(anyhow::anyhow!(
@@ -1528,6 +1555,7 @@ pub(super) async fn stream_response_websocket_persistent(
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: input_item_count,
+            last_input_prefix_hash: request_input_prefix_hash,
         });
         drop(guard);
         spawn_persistent_ws_keepalive(

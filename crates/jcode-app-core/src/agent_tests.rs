@@ -1732,6 +1732,16 @@ print(json.dumps(dict(version=1, session_id=r['session_id'], turn_id=r['turn_id'
             }
             let captured = requests.lock().unwrap();
             assert_eq!(captured.len() - before, if index == 0 { 3 } else { 1 });
+            if index == 0 {
+                let initial = &captured[before];
+                for continuation in &captured[before + 1..] {
+                    assert_eq!(
+                        serde_json::to_value(&continuation[..initial.len()]).unwrap(),
+                        serde_json::to_value(initial).unwrap(),
+                        "retrieved evidence must keep its position before subsequent tool rounds"
+                    );
+                }
+            }
             for request in &captured[before..] {
                 let injected: Vec<_> = request
                     .iter()

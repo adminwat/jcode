@@ -1,5 +1,33 @@
 // Public Provider::complete + EventStream regressions using a loopback Responses
 // server. These are deterministic protocol fixtures, not live OpenAI acceptance.
+async fn accept_persistent_terminal_ws(
+    listener: &tokio::net::TcpListener,
+) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+    use tokio::io::AsyncWriteExt;
+
+    loop {
+        let (mut tcp, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 512];
+        let request_len = tokio::time::timeout(Duration::from_secs(1), tcp.peek(&mut request))
+            .await
+            .unwrap()
+            .unwrap();
+        let request = &request[..request_len];
+        if request.starts_with(b"GET /v1/models ") {
+            let body = br#"{"data":[]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            tcp.write_all(response.as_bytes()).await.unwrap();
+            tcp.write_all(body).await.unwrap();
+            let _ = tcp.shutdown().await;
+            continue;
+        }
+        return tokio_tungstenite::accept_async(tcp).await.unwrap();
+    }
+}
+
 async fn persistent_terminal_public_case(
     error_kind: &str,
     code: Option<&str>,
@@ -19,10 +47,14 @@ async fn persistent_terminal_public_case(
         ChatMessage::user("next"),
     ];
     let full_input = build_responses_input(&messages);
+    let initial_prefix_hash = jcode_provider_core::fingerprint::stable_hash_json(
+        full_input
+            .get(..1)
+            .expect("fixture has an initial input item"),
+    );
     let expected_input = full_input.clone();
     let server = tokio::spawn(async move {
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let mut ws = accept_persistent_terminal_ws(&listener).await;
         let delta: Value =
             serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(delta["previous_response_id"], "resp_stale");
@@ -46,8 +78,7 @@ async fn persistent_terminal_public_case(
                 _ => break,
             }
         }
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let mut ws = accept_persistent_terminal_ws(&listener).await;
         let fresh: Value =
             serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert!(fresh.get("previous_response_id").is_none(), "{fresh}");
@@ -78,6 +109,7 @@ async fn persistent_terminal_public_case(
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_input_prefix_hash: Some(initial_prefix_hash),
     });
     let outcome = tokio::time::timeout(Duration::from_secs(2), async {
         let mut stream = provider
@@ -188,6 +220,9 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_input_prefix_hash: Some(jcode_provider_core::fingerprint::stable_hash_json(&[
+            serde_json::json!({"role":"user","content":"old"}),
+        ])),
     })));
     let state = Arc::clone(&persistent_ws);
     let (tx, mut rx) = mpsc::channel(100);
@@ -229,4 +264,72 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
     })
     .await
     .expect("failure should promptly release persistent state");
+}
+
+#[tokio::test]
+async fn persistent_ws_stale_input_prefix_does_not_send_continuation() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let deadline = tokio::time::sleep(Duration::from_millis(500));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut deadline => break,
+                frame = ws.next() => match frame {
+                    Some(Ok(WsMessage::Text(text))) => {
+                        panic!("stale persistent WS sent a continuation: {text}");
+                    }
+                    Some(Ok(WsMessage::Ping(payload))) => {
+                        ws.send(WsMessage::Pong(payload)).await.unwrap();
+                    }
+                    Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(_)) => {}
+                },
+            }
+        }
+    });
+    let (ws_stream, _) = connect_async(format!("ws://{addr}")).await.unwrap();
+    let credentials = Arc::new(RwLock::new(prewarm_test_credentials()));
+    let persistent_ws = Arc::new(Mutex::new(Some(PersistentWsState {
+        ws_stream,
+        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        last_response_id: "resp_stale".into(),
+        connected_at: Instant::now(),
+        last_activity_at: Instant::now(),
+        last_response_completed_at: Instant::now(),
+        message_count: 1,
+        last_input_item_count: 1,
+        last_input_prefix_hash: Some(jcode_provider_core::fingerprint::stable_hash_json(&[
+            serde_json::json!({"role":"user","content":"old"}),
+        ])),
+    })));
+    let (tx, mut rx) = mpsc::channel(8);
+
+    let result = try_persistent_ws_continuation(
+        &persistent_ws,
+        &credentials,
+        &serde_json::json!({"model":"gpt-5.6-sol"}),
+        &[
+            serde_json::json!({"role":"user","content":"replacement"}),
+            serde_json::json!({"role":"user","content":"new"}),
+        ],
+        2,
+        &tx,
+    )
+    .await;
+
+    assert!(matches!(result, PersistentWsResult::NotAvailable));
+    assert!(
+        persistent_ws.lock().await.is_none(),
+        "stale persistent state must be cleared before a fresh request"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "prefix mismatch must not emit a continuation status event"
+    );
+    drop(tx);
+    server.await.unwrap();
 }

@@ -229,7 +229,9 @@ impl Agent {
                     });
                 }
                 ephemeral_signature_messages.push(message.clone());
-                messages_with_memory.push(message);
+                crate::memory::insert_external_turn_memory(
+                    &mut messages_with_memory, &self.session, message,
+                );
             }
 
             logging::info(&format!(

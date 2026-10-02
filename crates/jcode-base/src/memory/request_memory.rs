@@ -9,6 +9,36 @@ pub struct ExternalTurnMemory {
     injection: Option<(Message, usize)>,
 }
 
+/// Keep ephemeral evidence at a stable boundary within its originating turn.
+/// Appending it after each tool result changes the previous request's prefix,
+/// invalidating caches and count-based incremental provider continuations.
+pub fn insert_external_turn_memory(
+    messages: &mut Vec<Message>,
+    session: &Session,
+    memory: Message,
+) {
+    let anchor = session.visible_conversation_messages().into_iter().find(|m| {
+        m.role == crate::message::Role::User
+            && session.model_usage_turn_id.as_deref()
+                == Some(format!("{}:{}", session.id, m.id).as_str())
+    });
+    let boundary = anchor.and_then(|anchor| {
+        let raw = anchor.to_message();
+        let stamped = Message::with_timestamps(std::slice::from_ref(&raw));
+        let raw_hash = crate::message::stable_message_hash(&raw);
+        let stamped_hash = crate::message::stable_message_hash(&stamped[0]);
+        messages.iter().position(|m| {
+            m.role == raw.role && m.timestamp == raw.timestamp && {
+                let hash = crate::message::stable_message_hash(m);
+                hash == raw_hash || hash == stamped_hash
+            }
+        })
+    });
+    // Compaction may omit the durable anchor from the request. Prepending then
+    // preserves append-only tool rounds without persisting or dropping evidence.
+    messages.insert(boundary.map_or(0, |index| index + 1), memory);
+}
+
 /// Cache successful reads and abstentions only for their originating turn.
 pub async fn prepare_external_turn_memory(
     cache: &mut Option<ExternalTurnMemory>,

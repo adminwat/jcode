@@ -542,6 +542,9 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_input_prefix_hash: Some(jcode_provider_core::fingerprint::stable_hash_json(&[
+            serde_json::json!({"type":"message","role":"user","content":"first"}),
+        ])),
     })));
     let (tx, rx) = mpsc::channel(1);
     drop(rx); // Mirrors a soft interrupt cancelling the active stream consumer.
