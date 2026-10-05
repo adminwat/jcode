@@ -479,6 +479,23 @@ fn extraction_context_keeps_tool_io_details() {
     assert_eq!(records[2]["is_error"], false);
 }
 
+/// Same defect on the incremental path: `format_content_block_for_extraction` had NO
+/// reminder filtering at all, so an embedded reminder reached the extraction context
+/// and could be stored as user-stated memory.
+#[test]
+fn extraction_context_strips_an_appended_system_reminder() {
+    let messages = vec![Message::user(
+        "Keep the memo.\n\n<system-reminder>\nSWARM COMPLETION REPORT REQUIRED\n\
+         Before finishing, call the swarm tool with action=\"report\".\n</system-reminder>",
+    )];
+
+    let context = format_context_for_extraction(&messages);
+
+    assert!(context.contains("Keep the memo."));
+    assert!(!context.contains("SWARM COMPLETION REPORT REQUIRED"));
+    assert!(!context.contains("<system-reminder>"));
+}
+
 #[test]
 fn memory_store_format_groups_by_category() {
     let mut store = MemoryStore::new();

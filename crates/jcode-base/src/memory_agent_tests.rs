@@ -192,6 +192,48 @@ fn extraction_transcript_omits_internal_system_reminders() {
     assert!(transcript.contains("Understood"));
 }
 
+/// The 2026-10-05 defect. `append_swarm_completion_report_instructions` puts the
+/// reminder at the END of a swarm worker's task prompt, so the old
+/// `starts_with("<system-reminder>")` guard let it through, and the extraction model
+/// stored "User stated: <task> SWARM COMPLETION REPORT REQUIRED …" as durable memory.
+#[test]
+fn extraction_transcript_strips_an_appended_system_reminder() {
+    let messages = vec![crate::message::Message::user(
+        "Implement the retry fix.\n\n<system-reminder>\nSWARM COMPLETION REPORT REQUIRED\n\
+         Before finishing, call the swarm tool with action=\"report\".\n</system-reminder>",
+    )];
+
+    let transcript = build_transcript_for_extraction(&messages);
+
+    assert!(transcript.contains("Implement the retry fix."));
+    assert!(!transcript.contains("SWARM COMPLETION REPORT REQUIRED"));
+    assert!(!transcript.contains("<system-reminder>"));
+}
+
+#[test]
+fn extraction_transcript_strips_a_truncated_reminder() {
+    let messages = vec![crate::message::Message::user(
+        "Keep the memo.\n\n<system-reminder>\nSWARM COMPLETION REPORT REQUIRED\nno closing tag",
+    )];
+
+    let transcript = build_transcript_for_extraction(&messages);
+
+    assert!(transcript.contains("Keep the memo."));
+    assert!(!transcript.contains("SWARM COMPLETION REPORT REQUIRED"));
+}
+
+#[test]
+fn extraction_transcript_drops_a_scaffolding_only_turn() {
+    let messages = vec![crate::message::Message::user(
+        "<system-reminder>\n# Session Context\nHardware: private\n</system-reminder>",
+    )];
+
+    let transcript = build_transcript_for_extraction(&messages);
+
+    assert!(!transcript.contains("Session Context"));
+    assert!(!transcript.contains("Hardware: private"));
+}
+
 #[test]
 fn extraction_transcript_has_roles_evidence_and_tool_outcomes() {
     let messages = vec![

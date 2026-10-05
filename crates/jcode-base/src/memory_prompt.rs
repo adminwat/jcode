@@ -11,6 +11,37 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+/// Remove harness-injected `<system-reminder>…</system-reminder>` spans from text
+/// before it can reach memory extraction.
+///
+/// A reminder is not always at the START of a message. The swarm completion
+/// instructions are *appended* to the task prompt (`append_swarm_completion_report_instructions`),
+/// so a `starts_with("<system-reminder>")` guard misses them and the extraction model
+/// stores the harness text as though the user had said it. That happened on 2026-10-05: a
+/// stored preference carried an appended `SWARM COMPLETION REPORT REQUIRED` block and
+/// re-fired every turn as if the harness had just issued it. Strip every span, wherever it
+/// sits, plus an unterminated trailing one.
+pub(crate) fn strip_system_reminders(text: &str) -> String {
+    const OPEN: &str = "<system-reminder";
+    const CLOSE: &str = "</system-reminder>";
+    if !text.contains(OPEN) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + OPEN.len()..];
+        match after.find(CLOSE) {
+            Some(end) => rest = &after[end + CLOSE.len()..],
+            // Unterminated reminder (truncated payload): drop the remainder.
+            None => return out.trim().to_string(),
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
 fn format_content_block_for_relevance(block: &crate::message::ContentBlock) -> Option<String> {
     match block {
         crate::message::ContentBlock::Text { text, .. } => {
@@ -205,15 +236,17 @@ pub(crate) fn format_context_for_extraction(messages: &[crate::message::Message]
         .saturating_sub(EXTRACTION_CONTEXT_MAX_MESSAGES);
     for (index, message) in messages.iter().enumerate() {
         // Tool results also have role User. Only actual user text starts a turn.
-        let user_text: Vec<&str> = message
+        let user_text: Vec<String> = message
             .content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text, .. }
-                    if message.role == Role::User
-                        && !text.trim_start().starts_with("<system-reminder>") =>
-                {
-                    Some(text.as_str())
+                ContentBlock::Text { text, .. } if message.role == Role::User => {
+                    let cleaned = strip_system_reminders(text);
+                    if cleaned.trim().is_empty() {
+                        None
+                    } else {
+                        Some(cleaned)
+                    }
                 }
                 _ => None,
             })
@@ -236,12 +269,15 @@ pub(crate) fn format_context_for_extraction(messages: &[crate::message::Message]
         }
         for block in &message.content {
             let (mut record, text) = match block {
-                ContentBlock::Text { text, .. }
-                    if !text.trim_start().starts_with("<system-reminder>") =>
-                {
+                ContentBlock::Text { text, .. } => {
+                    let cleaned = strip_system_reminders(text);
+                    let cleaned = cleaned.trim();
+                    if cleaned.is_empty() {
+                        continue;
+                    }
                     (
                         json!({"kind": if message.role == Role::User { "user" } else { "assistant_claim" }}),
-                        text.trim().to_string(),
+                        cleaned.to_string(),
                     )
                 }
                 ContentBlock::ToolUse {

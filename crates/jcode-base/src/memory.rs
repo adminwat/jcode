@@ -62,6 +62,7 @@ pub use pending::{
 use pending::{backdate_injected_memory_for_test, insert_pending_memory_for_test};
 use pending::{begin_memory_check, finish_memory_check};
 pub(crate) use prompt_support::format_context_for_extraction;
+pub(crate) use prompt_support::strip_system_reminders;
 pub use prompt_support::{
     focus_query_text, format_context_for_relevance, format_focused_query_for_relevance,
 };
