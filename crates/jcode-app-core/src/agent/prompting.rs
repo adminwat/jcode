@@ -59,6 +59,16 @@ impl Agent {
             let count = memory.count.max(1);
             let age_ms = memory.computed_at.elapsed().as_millis() as u64;
             crate::memory::record_injected_prompt(&memory.prompt, count, age_ms);
+            // The turn-delivery path replaced take_pending_memory() as the way
+            // memory reaches a session, but it never marked the ids it
+            // delivered. Without this, INJECTED_MEMORY_IDS stays empty, so the
+            // already-injected filters in memory_agent.rs and memory.rs can
+            // never fire and every turn re-surfaces the same memories.
+            // first_delivery is per turn, so provider continuations replaying
+            // the same payload mark once, not repeatedly.
+            if !memory.memory_ids.is_empty() {
+                crate::memory::mark_memories_injected(&self.session.id, &memory.memory_ids);
+            }
             crate::memory_log::log_pending_consumed(
                 &self.session.id,
                 count,
