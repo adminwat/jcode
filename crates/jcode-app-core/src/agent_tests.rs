@@ -1477,6 +1477,18 @@ async fn turn_memory_reaches_both_real_provider_loops_and_tool_continuations() {
                     "persistence must not duplicate per continuation"
                 );
                 assert!(!crate::memory::read_turn_memory(&sid, &turn).first_delivery);
+                // First delivery has to mark the ids it handed to the model.
+                // c9009577f moved delivery off take_pending_memory() and never
+                // re-added the marking call, so INJECTED_MEMORY_IDS stayed
+                // empty and the already-injected filters could never fire.
+                // Continuations replay the same payload, which must not mark
+                // again (that would extend the dedup TTL per replay).
+                if !late {
+                    assert!(
+                        crate::memory::is_memory_injected(&sid, "replay-canary"),
+                        "first delivery must mark its memory ids (streaming={streaming})"
+                    );
+                }
                 agent.set_memory_enabled(false);
                 assert!(!crate::memory::complete_turn_memory(
                     &sid,
