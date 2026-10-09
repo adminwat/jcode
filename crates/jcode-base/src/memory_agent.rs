@@ -64,6 +64,22 @@ pub fn take_session_topic_change(session_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The candidate-filter predicate: a memory is worth preparing only if this
+/// session has neither surfaced it before nor had it injected into it.
+///
+/// `turn_id` is intentionally absent from the signature. Commit c9009577f
+/// wrapped this test in `turn_id.is_some() ||`, and because every caller on
+/// the turn-delivery path carries a turn id, dedup silently stopped applying
+/// (candidate drops 320-1066/day -> 0; same-session repeat delivery ~58%).
+/// Keeping the turn id out of scope makes that class of bypass impossible here.
+fn memory_candidate_is_new(
+    surfaced: &std::collections::HashSet<String>,
+    session_id: &str,
+    id: &str,
+) -> bool {
+    !surfaced.contains(id) && !memory::is_memory_injected(session_id, id)
+}
+
 pub fn is_anchor_probe_or_synthetic(anchor: &crate::session::StoredMessage) -> bool {
     if anchor.display_role.is_some() {
         return true;
@@ -1013,14 +1029,17 @@ impl MemoryAgent {
         // 58%. Continuation replay is handled on the delivery side
         // (read_turn_memory/first_delivery), not by re-preparing already
         // injected memories here.
+        //
+        // `turn_id` is deliberately NOT an input to this predicate: keeping it
+        // out of scope is what makes the c9009577f bypass structurally
+        // impossible to re-introduce. See `memory_candidate_is_new`.
         let total_before_filter = candidates.len();
         let new_candidates: Vec<_> = {
             let ss = self.session_state(session_id);
             candidates
                 .into_iter()
                 .filter(|(entry, _)| {
-                    !ss.surfaced_memories.contains(&entry.id)
-                        && !memory::is_memory_injected(session_id, &entry.id)
+                    memory_candidate_is_new(&ss.surfaced_memories, session_id, &entry.id)
                 })
                 .collect()
         };

@@ -630,3 +630,37 @@ fn dynamic_gate_empty_input_returns_empty() {
     let out = dynamic_gate_select(Vec::new(), 5);
     assert!(out.is_empty());
 }
+
+#[test]
+fn candidate_filter_dedups_on_turn_path_without_any_turn_id_input() {
+    // Defect C (commit c9009577f): the candidate filter was rewritten as
+    // `turn_id.is_some() || (!surfaced && !injected)`. Every turn-delivery
+    // caller has turn_id == Some, so dedup never ran: candidate drops fell
+    // from 320-1066/day to exactly 0 and same-session repeat delivery hit 58%.
+    // The predicate now takes no turn id at all, so that bypass cannot be
+    // re-expressed. This test pins the behavior the bypass destroyed.
+    let _guard = crate::storage::lock_test_env();
+    let sid = "dedup-predicate-session";
+    let surfaced = std::collections::HashSet::from(["surfaced-id".to_string()]);
+
+    assert!(
+        memory_candidate_is_new(&surfaced, sid, "brand-new-id"),
+        "an unseen, un-injected candidate must survive the filter"
+    );
+    assert!(
+        !memory_candidate_is_new(&surfaced, sid, "surfaced-id"),
+        "a candidate this session already surfaced must be dropped"
+    );
+
+    memory::mark_memories_injected(sid, &["injected-id".to_string()]);
+    assert!(
+        !memory_candidate_is_new(&surfaced, sid, "injected-id"),
+        "a candidate already injected into this session must be dropped"
+    );
+
+    // Injection tracking is per-session: another session has never seen it.
+    assert!(
+        memory_candidate_is_new(&surfaced, "other-dedup-session", "injected-id"),
+        "a different session must still be allowed to receive the memory"
+    );
+}
