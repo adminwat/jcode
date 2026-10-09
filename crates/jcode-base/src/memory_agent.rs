@@ -1005,16 +1005,22 @@ impl MemoryAgent {
             return Ok(());
         }
 
-        // Filter out already-surfaced memories (per-session + global injection tracking)
+        // Filter out already-surfaced memories (per-session + global injection
+        // tracking). c9009577f wrapped this in `turn_id.is_some() ||`, which
+        // bypassed dedup for every caller on the turn-delivery path (turn_id
+        // is always Some there): candidate_filter dropped counts went from
+        // 320-1066/day to exactly 0, and same-session repeat delivery hit
+        // 58%. Continuation replay is handled on the delivery side
+        // (read_turn_memory/first_delivery), not by re-preparing already
+        // injected memories here.
         let total_before_filter = candidates.len();
         let new_candidates: Vec<_> = {
             let ss = self.session_state(session_id);
             candidates
                 .into_iter()
                 .filter(|(entry, _)| {
-                    turn_id.is_some()
-                        || (!ss.surfaced_memories.contains(&entry.id)
-                            && !memory::is_memory_injected(session_id, &entry.id))
+                    !ss.surfaced_memories.contains(&entry.id)
+                        && !memory::is_memory_injected(session_id, &entry.id)
                 })
                 .collect()
         };
