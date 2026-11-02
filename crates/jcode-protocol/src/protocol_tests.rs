@@ -22,6 +22,21 @@ fn todos_request_and_snapshot_roundtrip() {
 }
 use anyhow::{Result, anyhow};
 
+/// A schema with enough shape to catch a `Message` field that stops
+/// round-tripping: nested object, array, enum, and a required list.
+fn sample_response_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "title": { "type": "string" },
+            "tags": { "type": "array", "items": { "type": "string" } },
+            "confidence": { "type": "string", "enum": ["low", "high"] }
+        },
+        "required": ["title"],
+        "additionalProperties": false
+    })
+}
+
 fn parse_request_json(json: &str) -> Result<Request> {
     serde_json::from_str(json).map_err(Into::into)
 }

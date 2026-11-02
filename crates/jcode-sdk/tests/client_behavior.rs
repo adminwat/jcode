@@ -886,6 +886,7 @@ fn send_system_reminder_is_hidden_and_does_not_wait_for_acceptance() {
             system_reminder: Some("continue task".into()),
             images: vec![],
             no_reply: false,
+            response_schema: None,
         }
     );
 }

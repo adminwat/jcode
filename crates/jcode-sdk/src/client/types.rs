@@ -12,6 +12,12 @@ pub struct RunOptions {
     /// Auto-answer permission prompts. Only meaningful when the server
     /// advertises the `permissions` capability.
     pub auto_approve: bool,
+    /// JSON Schema the provider should enforce natively for this turn.
+    ///
+    /// `None` keeps the turn unconstrained. When set, a provider with native
+    /// structured outputs enforces it; one without ignores it and the caller
+    /// still validates the reply itself.
+    pub response_schema: Option<serde_json::Value>,
 }
 
 /// Runtime identity and protocol metadata returned by [`JcodeClient::get_runtime_info`].

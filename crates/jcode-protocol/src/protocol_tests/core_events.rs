@@ -135,10 +135,17 @@ fn test_request_roundtrip() -> Result<()> {
         system_reminder: None,
         active_skill: Some("verification".to_string()),
         no_reply: false,
+        response_schema: Some(sample_response_schema()),
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;
     assert_eq!(decoded.id(), 1);
+    // The schema is per-turn request state, so losing it in serialization
+    // would silently downgrade the turn to prompt-only guidance.
+    let Request::Message { response_schema, .. } = decoded else {
+        return Err(anyhow!("expected Message"));
+    };
+    assert_eq!(response_schema, Some(sample_response_schema()));
     Ok(())
 }
 

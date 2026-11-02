@@ -176,6 +176,8 @@ export type ApiRequest =
       images?: ImageAttachment[];
       no_reply?: boolean;
       system_reminder?: string;
+      /** JSON Schema the provider must enforce natively for this turn. */
+      response_schema?: unknown;
     }
   | { req: "cancel"; session_id: string }
   | {

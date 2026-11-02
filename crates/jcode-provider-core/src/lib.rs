@@ -352,6 +352,23 @@ pub trait Provider: Send + Sync {
         vec![]
     }
 
+    /// Ask this provider to enforce `schema` natively for the next completion.
+    ///
+    /// Returns false when the provider has no native structured-output field, or
+    /// when it cannot enforce this particular schema (for example a schema whose
+    /// constructs OpenAI rejects under `strict`). Returning false is a refusal,
+    /// not an error: the caller keeps its own validate-and-retry loop, which
+    /// remains the only guarantee on a provider that answers false.
+    ///
+    /// Per-turn state. The caller clears it when the turn ends, because a
+    /// provider-level schema would constrain every later completion.
+    fn set_response_schema(&self, _schema: &serde_json::Value) -> bool {
+        false
+    }
+
+    /// Release the schema set by [`Self::set_response_schema`].
+    fn clear_response_schema(&self) {}
+
     /// Get the active service tier override (if applicable).
     fn service_tier(&self) -> Option<String> {
         None

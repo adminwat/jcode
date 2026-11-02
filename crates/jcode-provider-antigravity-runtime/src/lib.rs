@@ -365,6 +365,10 @@ impl AntigravityProvider {
                 session_id: resume_session_id
                     .filter(|value| !value.trim().is_empty())
                     .map(str::to_string),
+                // Antigravity has no native structured-output path yet, so it
+                // keeps the prompt-only behaviour rather than claiming a
+                // guarantee it does not provide.
+                generation_config: None,
             },
         };
 

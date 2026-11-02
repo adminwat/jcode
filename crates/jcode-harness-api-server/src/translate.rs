@@ -693,6 +693,15 @@ impl BridgeState {
                 {
                     message["images"] = json!(images);
                 }
+                // Forward the schema untouched. Dropping it here would be
+                // silent: the turn still succeeds, just without the provider
+                // enforcing the shape, which is the exact failure this bridge
+                // exists to prevent.
+                if let Some(schema) = request.get("response_schema")
+                    && !schema.is_null()
+                {
+                    message["response_schema"] = schema.clone();
+                }
                 vec![Outbound::Legacy(message)]
             }
             "fork_session" => {

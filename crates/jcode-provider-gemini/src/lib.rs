@@ -157,6 +157,19 @@ pub struct VertexGenerateContentRequest {
     pub tool_config: Option<GeminiToolConfig>,
     #[serde(rename = "session_id", skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Native structured output. Gemini expresses it as
+    /// `generationConfig.responseMimeType` plus `responseSchema`, which is the
+    /// same OpenAPI subset its tool parameters use.
+    #[serde(rename = "generationConfig", skip_serializing_if = "Option::is_none")]
+    pub generation_config: Option<GeminiGenerationConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GeminiGenerationConfig {
+    #[serde(rename = "responseMimeType")]
+    pub response_mime_type: String,
+    #[serde(rename = "responseSchema")]
+    pub response_schema: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

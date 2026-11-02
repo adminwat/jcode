@@ -849,6 +849,7 @@ impl JcodeClient {
             system_reminder: Some(reminder.to_string()),
             images: Vec::new(),
             no_reply: false,
+            response_schema: None,
         })
     }
 
@@ -880,6 +881,27 @@ impl JcodeClient {
         system_reminder: Option<&str>,
         wait_for_accept: Option<Duration>,
     ) -> Result<()> {
+        self.send_message_with_schema(
+            session_id,
+            content,
+            images,
+            system_reminder,
+            wait_for_accept,
+            None,
+        )
+    }
+
+    /// [`send_message_with_reminder`](Self::send_message_with_reminder) that
+    /// also asks the provider to enforce `response_schema` for this turn.
+    pub(crate) fn send_message_with_schema(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<&str>,
+        wait_for_accept: Option<Duration>,
+        response_schema: Option<serde_json::Value>,
+    ) -> Result<()> {
         // Subscribe *before* writing: an ack that lands between the write and
         // the subscribe would otherwise be missed and time out a healthy turn.
         let stream = wait_for_accept.map(|_| self.events(Some(session_id)));
@@ -892,6 +914,7 @@ impl JcodeClient {
                 .map(str::to_owned),
             images,
             no_reply: false,
+            response_schema,
         })?;
         if let (Some(stream), Some(timeout)) = (stream, wait_for_accept) {
             let deadline = std::time::Instant::now() + timeout;
@@ -1564,11 +1587,13 @@ impl JcodeClient {
     /// of one turn out. Streaming consumers should use `events()` instead.
     pub fn run(&self, session_id: &str, content: &str, options: RunOptions) -> Result<TurnResult> {
         let stream = self.events(Some(session_id));
-        self.send_message(
+        self.send_message_with_schema(
             session_id,
             content,
             options.images.clone(),
+            None,
             Some(Duration::from_secs(10)),
+            options.response_schema.clone(),
         )?;
         let mut result = TurnResult::default();
         let mut text_stream = TextCollector::default();

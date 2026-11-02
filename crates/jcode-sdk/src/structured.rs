@@ -54,6 +54,9 @@ impl RunStructuredOptions {
             images: self.images.clone(),
             on_event,
             auto_approve: self.auto_approve,
+            // The provider enforces the caller's schema for this turn, so a
+            // conforming reply never depends on the prompt being obeyed.
+            response_schema: Some(self.schema.clone()),
         }
     }
 }

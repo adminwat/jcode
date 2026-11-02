@@ -145,7 +145,10 @@ pub(super) fn control(
             "Stopped /{command} at the next turn boundary. The current turn is not cancelled."
         ));
         let data = status_data(session_id, state)?;
-        Ok(Some((data, state.last_notice.as_deref().unwrap_or("").to_owned())))
+        Ok(Some((
+            data,
+            state.last_notice.as_deref().unwrap_or("").to_owned(),
+        )))
     })
 }
 
@@ -387,6 +390,7 @@ pub(super) async fn run_reserved_followups(
             result,
             None,
             event_tx.clone(),
+            None,
         )
         .await;
         if let Err(error) = &result {

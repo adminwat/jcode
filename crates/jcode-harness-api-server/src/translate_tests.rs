@@ -4281,3 +4281,41 @@ fn context_cap_requests_reply_broadcast_and_validate() {
         }
     ));
 }
+
+#[test]
+fn response_schema_is_forwarded_to_the_daemon_and_omitted_when_absent() {
+    let mut state = state_with_session();
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title"],
+        "properties": { "title": { "type": "string" } }
+    });
+    let out = state.api_request_to_legacy(&json!({"req":"send_message", "id":95,
+        "session_id":"s1", "content":"Return JSON", "response_schema": schema}));
+    assert_eq!(out.len(), 1);
+    let Outbound::Legacy(message) = &out[0] else {
+        panic!("message")
+    };
+    // Dropping it here would still produce a successful turn, just an
+    // unconstrained one, which is the failure this forward exists to prevent.
+    assert_eq!(message["response_schema"], schema);
+
+    let out = state.api_request_to_legacy(&json!({"req":"send_message", "id":96,
+        "session_id":"s1", "content":"plain"}));
+    let Outbound::Legacy(plain) = &out[0] else {
+        panic!("message")
+    };
+    assert!(
+        plain.get("response_schema").is_none(),
+        "an ordinary turn must not constrain the provider"
+    );
+
+    // An explicit null is a client clearing the field, not a schema.
+    let out = state.api_request_to_legacy(&json!({"req":"send_message", "id":97,
+        "session_id":"s1", "content":"plain", "response_schema": null}));
+    let Outbound::Legacy(nulled) = &out[0] else {
+        panic!("message")
+    };
+    assert!(nulled.get("response_schema").is_none());
+}

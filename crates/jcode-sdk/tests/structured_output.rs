@@ -303,3 +303,67 @@ fn structured_output_uses_final_message_not_process_narration() {
     assert_eq!(result.text, "{\"summary\":\"done\",\"count\":2}");
     assert_eq!(result.attempts.len(), 1);
 }
+
+#[test]
+fn run_structured_sends_the_callers_schema_on_the_wire() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&sent);
+    let client = fake_harness(move |frame, writer| {
+        if let ApiRequest::SendMessage {
+            response_schema, ..
+        } = &frame.request
+        {
+            recorder.lock().unwrap().push(response_schema.clone());
+        }
+        send_turn(writer, "s1", "{\"summary\":\"ok\",\"count\":1}");
+    });
+
+    let result = client
+        .run_structured::<Summary>(
+            "s1",
+            "Return a summary",
+            RunStructuredOptions::new(schema()),
+        )
+        .expect("structured turn");
+
+    assert_eq!(
+        result.data,
+        Summary {
+            summary: "ok".into(),
+            count: 1
+        }
+    );
+    let sent = sent.lock().unwrap();
+    assert_eq!(sent.len(), 1, "one attempt, so one request");
+    assert_eq!(
+        sent[0],
+        Some(schema()),
+        "the provider cannot enforce a schema that never left the client"
+    );
+}
+
+#[test]
+fn a_plain_run_leaves_the_turn_without_a_schema() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&sent);
+    let client = fake_harness(move |frame, writer| {
+        if let ApiRequest::SendMessage {
+            response_schema, ..
+        } = &frame.request
+        {
+            recorder.lock().unwrap().push(response_schema.clone());
+        }
+        send_turn(writer, "s1", "plain answer");
+    });
+
+    client
+        .run("s1", "Say something", Default::default())
+        .expect("plain turn");
+
+    let sent = sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0], None,
+        "an ordinary turn must not constrain the provider"
+    );
+}

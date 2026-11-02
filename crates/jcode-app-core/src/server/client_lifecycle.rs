@@ -103,6 +103,8 @@ struct ProcessingMessage {
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     active_skill: Option<String>,
+    /// JSON Schema the provider should enforce natively for this turn.
+    response_schema: Option<serde_json::Value>,
     /// Retry on the next pool account after a usage limit (API clients).
     server_failover: bool,
 }
@@ -1083,6 +1085,7 @@ pub(super) async fn handle_client(
                 system_reminder,
                 active_skill,
                 no_reply,
+                response_schema,
             } => {
                 if no_reply {
                     append_context_message(
@@ -1118,6 +1121,7 @@ pub(super) async fn handle_client(
                         images,
                         system_reminder,
                         active_skill,
+                        response_schema,
                         server_failover: supports_server_failover,
                     },
                     &client_session_id,
@@ -1238,6 +1242,7 @@ pub(super) async fn handle_client(
                             images,
                             system_reminder: None,
                             active_skill: None,
+                            response_schema: None,
                             server_failover: supports_server_failover,
                         },
                         &client_session_id,
@@ -2395,7 +2400,7 @@ pub(super) async fn handle_client(
                             start_processing_message(
                                 ProcessingMessage {
                                     id, content, images: Vec::new(), system_reminder: None,
-                                    active_skill: None, server_failover: true,
+                                    active_skill: None, response_schema: None, server_failover: true,
                                 },
                                 &client_session_id,
                                 &mut ProcessingState {
@@ -3534,6 +3539,7 @@ async fn start_processing_message(
         images,
         system_reminder,
         active_skill,
+        response_schema,
         server_failover,
     } = message;
     if server_reload_starting() {
@@ -3657,7 +3663,7 @@ async fn start_processing_message(
         let mut stop_reason = crate::protocol::TurnStopReason::Failure;
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
             client_terminal_env,
-            super::turn_failover::process_reserved_message_with_server_failover(
+            super::turn_failover::process_reserved_message_with_server_failover_and_schema(
                 agent,
                 &turn_lease,
                 &content,
@@ -3665,6 +3671,7 @@ async fn start_processing_message(
                 system_reminder,
                 event_tx,
                 server_failover,
+                response_schema,
             ),
         ))
         .catch_unwind()
@@ -4141,10 +4148,42 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    process_reserved_message_streaming_mpsc_with_schema(
+        agent,
+        lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        None,
+    )
+    .await
+}
+
+/// Same turn, but asks the provider to enforce `response_schema` natively.
+/// `None` is the prompt-only behaviour every internal caller keeps.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn process_reserved_message_streaming_mpsc_with_schema(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    response_schema: Option<serde_json::Value>,
+) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
     let result = agent
-        .run_reserved_streaming_mpsc(lease, content, images, system_reminder, event_tx, None)
+        .run_reserved_streaming_mpsc_with_schema(
+            lease,
+            content,
+            images,
+            system_reminder,
+            event_tx,
+            None,
+            response_schema,
+        )
         .await;
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(

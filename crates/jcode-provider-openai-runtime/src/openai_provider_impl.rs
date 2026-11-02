@@ -1292,7 +1292,38 @@ impl Provider for OpenAIProvider {
             prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(self.is_browser_only())),
+            // A schema belongs to the turn that asked for it, so a fork starts
+            // clean rather than inheriting the parent's constraint.
+            response_schema: Arc::new(StdRwLock::new(None)),
         })
+    }
+
+    fn set_response_schema(&self, schema: &Value) -> bool {
+        // Same two steps the Chat Completions structured-output path uses, so a
+        // schema that is sendable there is sendable here: convert to the
+        // OpenAI-compatible dialect, then confirm strict mode can enforce it.
+        let compatible = jcode_provider_core::openai_schema::openai_compatible_schema(schema);
+        if !jcode_provider_core::openai_schema::schema_supports_strict(&compatible) {
+            jcode_base::logging::debug(
+                "OpenAI structured output refused for this turn (schema cannot be enforced under strict mode); falling back to prompt-and-retry",
+            );
+            return false;
+        }
+        let normalized = jcode_provider_core::openai_schema::strict_normalize_schema(&compatible);
+        let mut guard = self
+            .response_schema
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(normalized);
+        true
+    }
+
+    fn clear_response_schema(&self) {
+        let mut guard = self
+            .response_schema
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = None;
     }
 
     async fn invalidate_credentials(&self) {

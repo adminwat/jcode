@@ -100,6 +100,9 @@ pub enum ApiRequest {
         /// Persist the message as context without starting a model turn.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_reply: bool,
+        /// JSON Schema the provider should enforce natively for this turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_schema: Option<serde_json::Value>,
     },
 
     /// Replace the attached session's tool configuration.

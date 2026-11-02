@@ -14,6 +14,9 @@ mod cache_session_affinity;
 #[path = "agent_tests/tool_streaming.rs"]
 mod tool_streaming;
 
+#[path = "agent_tests/schema_turn.rs"]
+mod schema_turn;
+
 #[path = "agent_tests/concurrency.rs"]
 mod concurrency;
 

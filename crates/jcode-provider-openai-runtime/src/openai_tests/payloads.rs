@@ -667,3 +667,97 @@ fn configured_swarm_root_effort_reads_real_config() {
         assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
     }
 }
+
+/// A schema strict mode can enforce: every object closed, every property
+/// required.
+fn strict_ready_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "tags"],
+        "properties": {
+            "title": { "type": "string" },
+            "tags": { "type": "array", "items": { "type": "string" } }
+        }
+    })
+}
+
+#[test]
+fn set_response_schema_refuses_what_strict_mode_cannot_enforce() {
+    let provider = OpenAIProvider::new_browser_only();
+
+    // An open object cannot be closed without changing what the caller meant,
+    // so the provider must decline rather than send a schema it cannot honour.
+    let unenforceable = serde_json::json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": { "note": { "type": "string" } }
+    });
+    assert!(
+        !provider.set_response_schema(&unenforceable),
+        "open objects cannot be enforced under strict mode"
+    );
+
+    assert!(
+        provider.set_response_schema(&strict_ready_schema()),
+        "a closed schema with every property required is enforceable"
+    );
+    // Strict normalisation fills in what the caller left implicit, so the stored
+    // schema is what gets sent, not the caller's object.
+    let stored = provider
+        .response_schema
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .expect("schema stored");
+    assert_eq!(stored["additionalProperties"], serde_json::json!(false));
+    let required: Vec<&str> = stored["required"]
+        .as_array()
+        .expect("required list")
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect();
+    // Order is the map's, not the caller's; strict mode only requires that
+    // every property is listed.
+    assert_eq!(required, vec!["tags", "title"]);
+
+    provider.clear_response_schema();
+    assert!(
+        provider
+            .response_schema
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none(),
+        "clear releases the turn's constraint"
+    );
+}
+
+#[test]
+fn generated_request_body_carries_the_json_schema_format() {
+    let provider = OpenAIProvider::new_browser_only();
+    assert!(provider.set_response_schema(&strict_ready_schema()));
+
+    let request =
+        provider.response_request_for_model("gpt-5.4", &[], &[], "system", false);
+
+    let format = &request["text"]["format"];
+    assert_eq!(format["type"], serde_json::json!("json_schema"));
+    assert_eq!(format["strict"], serde_json::json!(true));
+    assert_eq!(
+        format["name"],
+        serde_json::json!("structured_output"),
+        "the Responses API requires a format name"
+    );
+    assert_eq!(
+        format["schema"]["properties"]["tags"]["items"]["type"],
+        serde_json::json!("string"),
+        "the schema body must survive into the request, not just its shape"
+    );
+
+    provider.clear_response_schema();
+    let unserialized = provider.response_request_for_model("gpt-5.4", &[], &[], "system", false);
+    assert!(
+        unserialized.get("text").is_none(),
+        "a cleared schema must leave the body exactly as it was before the turn"
+    );
+}

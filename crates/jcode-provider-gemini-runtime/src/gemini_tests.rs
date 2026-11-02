@@ -1051,3 +1051,71 @@ fn ensure_state_replaces_oauth_cache_when_switching_to_api_key() {
         );
     });
 }
+
+/// A schema written the way callers write them: draft-style keywords that
+/// Gemini's OpenAPI subset rejects, plus the shape that must survive.
+fn caller_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "$defs": { "unused": { "type": "string" } },
+        "required": ["title", "tags"],
+        "properties": {
+            "title": { "type": "string" },
+            "tags": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+        }
+    })
+}
+
+#[test]
+fn response_schema_is_narrowed_to_the_gemini_dialect() {
+    let provider = GeminiProvider::new();
+    assert!(provider.set_response_schema(&caller_schema()));
+
+    let config = provider
+        .structured_generation_config()
+        .expect("schema attached");
+    // Without this MIME type Gemini answers prose that merely contains JSON.
+    assert_eq!(config.response_mime_type, "application/json");
+
+    let sent = serde_json::to_value(&config).expect("serialize generation config");
+    assert_eq!(sent["responseMimeType"], json!("application/json"));
+    let schema = &sent["responseSchema"];
+    assert_eq!(schema["type"], json!("object"));
+    assert_eq!(
+        schema["properties"]["tags"]["items"]["type"],
+        json!("string")
+    );
+    for rejected in ["$defs", "additionalProperties", "uniqueItems"] {
+        assert!(
+            !contains_key(schema, rejected),
+            "{rejected} is outside Gemini's subset and fails the whole request"
+        );
+    }
+
+    provider.clear_response_schema();
+    assert!(
+        provider.structured_generation_config().is_none(),
+        "a cleared schema must not leak into later turns"
+    );
+}
+
+#[test]
+fn response_schema_refuses_a_root_ref_it_cannot_constrain() {
+    let provider = GeminiProvider::new();
+    // Nothing in Gemini's subset expresses "$ref at the root", so claiming a
+    // native guarantee here would be a lie the caller cannot detect.
+    assert!(!provider.set_response_schema(&json!({
+        "$ref": "#/$defs/summary",
+        "$defs": { "summary": { "type": "object", "properties": { "a": { "type": "string" } } } }
+    })));
+    assert!(provider.structured_generation_config().is_none());
+}
+
+fn contains_key(value: &Value, key: &str) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(k, v)| k == key || contains_key(v, key)),
+        Value::Array(items) => items.iter().any(|item| contains_key(item, key)),
+        _ => false,
+    }
+}

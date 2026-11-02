@@ -23,6 +23,9 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
         } else {
             None
         };
+        let response_schema = rng
+            .random_bool(0.5)
+            .then(sample_response_schema);
         let req = Request::Message {
             id,
             content: content.clone(),
@@ -30,6 +33,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             system_reminder: system_reminder.clone(),
             active_skill: None,
             no_reply: rng.random_bool(0.5),
+            response_schema: response_schema.clone(),
         };
         let decoded = parse_request_json(&serde_json::to_string(&req)?)?;
         let Request::Message {
@@ -38,6 +42,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             images: decoded_images,
             system_reminder: decoded_system_reminder,
             no_reply: decoded_no_reply,
+            response_schema: decoded_response_schema,
             ..
         } = decoded
         else {
@@ -47,6 +52,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
         assert_eq!(decoded_content, content);
         assert_eq!(decoded_images, images);
         assert_eq!(decoded_system_reminder, system_reminder);
+        assert_eq!(decoded_response_schema, response_schema);
         assert_eq!(
             decoded_no_reply,
             matches!(req, Request::Message { no_reply: true, .. })

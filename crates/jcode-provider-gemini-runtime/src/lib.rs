@@ -16,11 +16,12 @@ pub use jcode_provider_gemini::{
     AVAILABLE_MODELS, CODE_ASSIST_API_VERSION, CODE_ASSIST_ENDPOINT, ClientMetadata,
     CodeAssistGenerateRequest, CodeAssistGenerateResponse, DEFAULT_MODEL, GEMINI_API_ENDPOINT,
     GEMINI_API_VERSION, GeminiCandidate, GeminiContent, GeminiFunctionCall,
-    GeminiFunctionCallingConfig, GeminiFunctionDeclaration, GeminiFunctionResponse, GeminiPart,
-    GeminiPromptFeedback, GeminiRuntimeState, GeminiTool, GeminiToolConfig, GeminiUsageMetadata,
-    GeminiUserTier, IneligibleTier, InlineData, LoadCodeAssistRequest, LoadCodeAssistResponse,
-    LongRunningOperationResponse, OnboardUserRequest, OnboardUserResponse, ProjectRef,
-    USER_TIER_FREE, VertexGenerateContentRequest, VertexGenerateContentResponse, build_contents,
+    GeminiFunctionCallingConfig, GeminiFunctionDeclaration, GeminiFunctionResponse,
+    GeminiGenerationConfig, GeminiPart, GeminiPromptFeedback, GeminiRuntimeState, GeminiTool,
+    GeminiToolConfig, GeminiUsageMetadata, GeminiUserTier, IneligibleTier, InlineData,
+    LoadCodeAssistRequest, LoadCodeAssistResponse, LongRunningOperationResponse,
+    OnboardUserRequest, OnboardUserResponse, ProjectRef, USER_TIER_FREE,
+    VertexGenerateContentRequest, VertexGenerateContentResponse, build_contents,
     build_system_instruction_with_tool_guard, build_tools, choose_onboard_tier, client_metadata,
     extract_gemini_model_ids, gemini_fallback_models, google_cloud_project_from_env,
     ineligible_or_project_error, is_gemini_model_id, load_code_assist_request,
@@ -46,6 +47,10 @@ pub struct GeminiProvider {
     model: Arc<RwLock<String>>,
     state: Arc<Mutex<Option<CachedGeminiState>>>,
     fetched_models: Arc<RwLock<Vec<String>>>,
+    /// Schema for the next completion only, set by
+    /// `Provider::set_response_schema` and already narrowed to the Gemini
+    /// dialect when stored.
+    response_schema: Arc<std::sync::RwLock<Option<Value>>>,
 }
 
 /// How the Gemini provider authenticates to Google.
@@ -79,6 +84,7 @@ impl GeminiProvider {
             model: Arc::new(RwLock::new(model)),
             state: Arc::new(Mutex::new(None)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
+            response_schema: Arc::new(std::sync::RwLock::new(None)),
         };
         provider.seed_cached_catalog();
         provider
@@ -525,6 +531,7 @@ impl GeminiProvider {
                         .unwrap_or(&state.session_id)
                         .to_string(),
                 ),
+                generation_config: self.structured_generation_config(),
             },
         };
 
@@ -602,6 +609,41 @@ impl Default for GeminiProvider {
 
 #[async_trait]
 impl Provider for GeminiProvider {
+    fn set_response_schema(&self, schema: &Value) -> bool {
+        // Gemini validates `responseSchema` as the same OpenAPI subset it uses
+        // for tool parameters, so narrow it with the shared dialect engine
+        // rather than a second sanitizer here.
+        let narrowed = jcode_provider_gemini::gemini_compatible_schema(schema);
+        // `normalize` drops keywords; if nothing constraining survives (a root
+        // `$ref`, for example) there is no native guarantee to claim, so refuse
+        // and let the caller's validate-and-retry loop do the work.
+        let constrains = narrowed.as_object().is_some_and(|map| {
+            ["type", "properties", "items", "anyOf", "enum", "oneOf"]
+                .iter()
+                .any(|key| map.contains_key(*key))
+        });
+        if !constrains {
+            jcode_base::logging::debug(
+                "Gemini structured output refused for this turn (schema has nothing left to constrain); falling back to prompt-and-retry",
+            );
+            return false;
+        }
+        let mut guard = self
+            .response_schema
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(narrowed);
+        true
+    }
+
+    fn clear_response_schema(&self) {
+        let mut guard = self
+            .response_schema
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = None;
+    }
+
     async fn complete(
         &self,
         messages: &[Message],
@@ -636,6 +678,7 @@ impl Provider for GeminiProvider {
                     model: provider.model.clone(),
                     state: state_cache.clone(),
                     fetched_models: provider.fetched_models.clone(),
+                    response_schema: Arc::new(std::sync::RwLock::new(None)),
                 };
                 match provider.ensure_state().await {
                     Ok(state) => state,
@@ -1031,6 +1074,7 @@ impl Provider for GeminiProvider {
             model: Arc::new(RwLock::new(self.model())),
             state: self.state.clone(),
             fetched_models: self.fetched_models.clone(),
+            response_schema: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -1047,7 +1091,26 @@ impl Clone for GeminiProvider {
             model: self.model.clone(),
             state: self.state.clone(),
             fetched_models: self.fetched_models.clone(),
+            // A schema is per-turn state; a clone starts unconstrained.
+            response_schema: Arc::new(std::sync::RwLock::new(None)),
         }
+    }
+}
+
+impl GeminiProvider {
+    /// The `generationConfig` for the current turn, or `None` when no schema is
+    /// attached. Reads the per-turn state so a plain completion is unaffected.
+    fn structured_generation_config(&self) -> Option<GeminiGenerationConfig> {
+        let schema = self
+            .response_schema
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()?;
+        Some(GeminiGenerationConfig {
+            // Without this Gemini returns prose that happens to contain JSON.
+            response_mime_type: "application/json".to_string(),
+            response_schema: schema,
+        })
     }
 }
 

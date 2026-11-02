@@ -703,6 +703,9 @@ pub struct OpenAIProvider {
     /// True when this runtime was created without API credentials. It can still
     /// serve browser-backed models and upgrades in place after a successful login.
     browser_only: Arc<AtomicBool>,
+    /// Schema for the next completion only, set by
+    /// `Provider::set_response_schema` and already strict-normalized when stored.
+    response_schema: Arc<StdRwLock<Option<Value>>>,
 }
 
 impl OpenAIProvider {
@@ -863,6 +866,7 @@ impl OpenAIProvider {
             prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(browser_only)),
+            response_schema: Arc::new(StdRwLock::new(None)),
         };
         provider.revalidate_reasoning_effort();
         provider.warn_unsupported_service_tier();
@@ -1363,7 +1367,12 @@ impl OpenAIProvider {
         let service_tier = self.effective_service_tier(model_id);
         let native_compaction_threshold =
             self.native_compaction_threshold_for_context_window(self.context_window());
-        Self::build_response_request(
+        let response_schema = self
+            .response_schema
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        Self::build_response_request_with_schema(
             model_id,
             system.to_string(),
             input,
@@ -1375,9 +1384,11 @@ impl OpenAIProvider {
             Some(&self.cache_routing_key()),
             self.prompt_cache_retention.as_deref(),
             native_compaction_threshold,
+            response_schema.as_ref(),
         )
     }
 
+    #[cfg(test)]
     #[expect(
         clippy::too_many_arguments,
         reason = "request construction threads explicit per-request OpenAI settings without hidden state"
@@ -1394,6 +1405,40 @@ impl OpenAIProvider {
         prompt_cache_key: Option<&str>,
         prompt_cache_retention: Option<&str>,
         native_compaction_threshold: Option<usize>,
+    ) -> Value {
+        Self::build_response_request_with_schema(
+            model_id,
+            instructions,
+            input,
+            api_tools,
+            is_chatgpt_mode,
+            max_output_tokens,
+            reasoning_effort,
+            service_tier,
+            prompt_cache_key,
+            prompt_cache_retention,
+            native_compaction_threshold,
+            None,
+        )
+    }
+
+    /// As [`Self::build_response_request`], plus a native structured-output
+    /// schema for this turn. `Some` emits the Responses API `text.format`
+    /// json_schema block; `None` is byte-identical to the schema-less body.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_response_request_with_schema(
+        model_id: &str,
+        instructions: String,
+        input: &[Value],
+        api_tools: &[Value],
+        is_chatgpt_mode: bool,
+        max_output_tokens: Option<u32>,
+        reasoning_effort: Option<&str>,
+        service_tier: Option<&str>,
+        prompt_cache_key: Option<&str>,
+        prompt_cache_retention: Option<&str>,
+        native_compaction_threshold: Option<usize>,
+        response_schema: Option<&Value>,
     ) -> Value {
         let mut tools = api_tools.to_vec();
         // The hosted `image_generation` tool is only available to general
@@ -1426,6 +1471,22 @@ impl OpenAIProvider {
         // The provider filters against the actual request model before building.
         if let Some(service_tier) = service_tier {
             request["service_tier"] = serde_json::json!(service_tier);
+        }
+
+        // Native structured output. The Responses API carries this as
+        // `text.format`, not the Chat Completions `response_format`. The caller
+        // has already refused schemas that cannot be strict, so anything
+        // arriving here is sent with `strict: true` and therefore enforced by
+        // the provider instead of merely requested in the prompt.
+        if let Some(schema) = response_schema {
+            request["text"] = serde_json::json!({
+                "format": {
+                    "type": "json_schema",
+                    "name": "structured_output",
+                    "strict": true,
+                    "schema": schema,
+                }
+            });
         }
 
         if let Some(compact_threshold) = native_compaction_threshold {
@@ -1550,9 +1611,9 @@ mod stream;
 use self::openai_stream_runtime::try_persistent_ws_continuation;
 use self::openai_stream_runtime::{PersistentWsResult, is_retryable_error, openai_access_token};
 
-use self::stream::{OpenAIResponsesStream, parse_openai_response_event};
 #[cfg(test)]
 use self::stream::handle_openai_output_item;
+use self::stream::{OpenAIResponsesStream, parse_openai_response_event};
 
 mod chatgpt_web;
 mod native_web_search;

@@ -1,6 +1,20 @@
 use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_println as println};
 
+/// Holds a provider's native response schema for the lifetime of one turn.
+///
+/// The schema is provider state, not a request field, so something has to
+/// release it. Tying that to `Drop` is what makes the release unconditional:
+/// an early `return`, a `?`, or an unwinding panic all run it, whereas a manual
+/// clear after the model loop is skipped by every one of those paths.
+pub(crate) struct ResponseSchemaGuard(pub(crate) std::sync::Arc<dyn crate::provider::Provider>);
+
+impl Drop for ResponseSchemaGuard {
+    fn drop(&mut self) {
+        self.0.clear_response_schema();
+    }
+}
+
 impl Agent {
     /// Refuse to run a model turn when this session moved to another machine
     /// or this in-memory copy is older than the transcript on disk.
@@ -150,6 +164,32 @@ impl Agent {
         event_tx: mpsc::UnboundedSender<ServerEvent>,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
+        self.run_reserved_streaming_mpsc_with_schema(
+            lease,
+            user_message,
+            images,
+            system_reminder,
+            event_tx,
+            display_role,
+            None,
+        )
+        .await
+    }
+
+    /// Turn entry for callers that want the provider to enforce a JSON Schema
+    /// natively. `response_schema` is `None` for every internal caller (swarm
+    /// ticks, followups, relays); only an SDK `run_structured` request sets it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn run_reserved_streaming_mpsc_with_schema(
+        &mut self,
+        lease: &TurnLease,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        display_role: Option<crate::session::StoredDisplayRole>,
+        response_schema: Option<serde_json::Value>,
+    ) -> Result<()> {
         self.validate_server_turn(lease)?;
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
@@ -204,6 +244,14 @@ impl Agent {
         if let Some(reminder) = system_reminder {
             self.append_turn_system_reminder(&reminder)?;
         }
+        // Attach the schema only now: `append_user_context_message_with_display_role`
+        // above can fail, and a schema attached before a failed turn would stay
+        // on the provider and silently constrain every later completion. The
+        // guard clears it on drop, including on the early returns and panics
+        // the model loop can produce.
+        let _response_schema_guard = response_schema
+            .filter(|schema| self.provider.set_response_schema(schema))
+            .map(|_| ResponseSchemaGuard(Arc::clone(&self.provider)));
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
@@ -222,6 +270,7 @@ impl Agent {
         lease: &TurnLease,
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
+        response_schema: Option<serde_json::Value>,
     ) -> Result<()> {
         self.validate_server_turn(lease)?;
         if self.is_graceful_shutdown() {
@@ -230,6 +279,12 @@ impl Agent {
         // The original attempt already persisted the turn's reminder in the
         // transcript, so the retried request carries it unchanged.
         let _ = system_reminder;
+        // The failed attempt dropped its own guard, so the retried turn owns
+        // the schema again. Without this the retry would run unconstrained and
+        // the account switch would quietly downgrade the request.
+        let _response_schema_guard = response_schema
+            .filter(|schema| self.provider.set_response_schema(schema))
+            .map(|_| ResponseSchemaGuard(Arc::clone(&self.provider)));
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
         self.fire_turn_start_hook("failover");

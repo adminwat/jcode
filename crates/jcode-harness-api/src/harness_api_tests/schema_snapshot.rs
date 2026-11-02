@@ -57,6 +57,7 @@ fn client_frame_wire_shape() {
             images: vec![],
             system_reminder: None,
             no_reply: false,
+            response_schema: None,
         },
     );
     let json = serde_json::to_string(&frame).unwrap();
@@ -76,6 +77,7 @@ fn send_message_no_reply_wire_shape_and_legacy_default() {
             images: vec![],
             system_reminder: None,
             no_reply: true,
+            response_schema: None,
         },
     );
     let json = serde_json::to_string(&frame).unwrap();
@@ -93,6 +95,7 @@ fn send_message_no_reply_wire_shape_and_legacy_default() {
         ApiRequest::SendMessage {
             system_reminder: None,
             no_reply: false,
+            response_schema: None,
             ..
         }
     ));
@@ -603,6 +606,7 @@ fn hidden_system_reminder_wire_shape_and_legacy_default() {
             system_reminder: Some("continue task".into()),
             images: vec![],
             no_reply: false,
+            response_schema: None,
         },
     );
     let wire = serde_json::to_value(&frame).unwrap();
@@ -770,4 +774,55 @@ fn turn_stopped_schema_and_future_reason_compatibility() {
         serde_json::from_value(serde_json::json!({"v":1,"ev":"turn_done","session_id":"s1"}))
             .unwrap();
     assert!(matches!(done.event, ApiEvent::TurnDone { .. }));
+}
+
+fn sample_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title"],
+        "properties": { "title": { "type": "string" } }
+    })
+}
+
+#[test]
+fn send_message_carries_the_schema_byte_exactly() {
+    let request = ApiRequest::SendMessage {
+        session_id: "s1".into(),
+        content: "Return JSON".into(),
+        system_reminder: None,
+        images: vec![],
+        no_reply: false,
+        response_schema: Some(sample_schema()),
+    };
+    let wire = serde_json::to_value(&request).unwrap();
+    // Byte-exact: the daemon forwards this object to the provider, so any
+    // reshaping here silently changes what the model is constrained by.
+    assert_eq!(wire["response_schema"], sample_schema());
+    assert_eq!(serde_json::from_value::<ApiRequest>(wire).unwrap(), request);
+}
+
+#[test]
+fn a_schema_less_send_message_keeps_the_legacy_wire_shape() {
+    let legacy = serde_json::json!({
+        "req": "send_message",
+        "session_id": "s1",
+        "content": "hello",
+        "images": [],
+        "no_reply": false
+    });
+    let decoded: ApiRequest = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(matches!(
+        &decoded,
+        ApiRequest::SendMessage {
+            response_schema: None,
+            ..
+        }
+    ));
+    // Old clients never send the key, so it must not appear on the way out.
+    let wire = serde_json::to_value(&decoded).unwrap();
+    assert!(
+        wire.get("response_schema").is_none(),
+        "an absent schema must stay absent on the wire"
+    );
 }
