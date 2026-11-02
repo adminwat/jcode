@@ -40,6 +40,7 @@ fn client_frame_wire_shape() {
             images: vec![],
             system_reminder: None,
             no_reply: false,
+            response_schema: None,
         },
     );
     let json = serde_json::to_string(&frame).unwrap();
@@ -59,6 +60,7 @@ fn send_message_no_reply_wire_shape_and_legacy_default() {
             images: vec![],
             system_reminder: None,
             no_reply: true,
+            response_schema: None,
         },
     );
     let json = serde_json::to_string(&frame).unwrap();
@@ -482,6 +484,7 @@ fn hidden_system_reminder_wire_shape_and_legacy_default() {
             system_reminder: Some("continue task".into()),
             images: vec![],
             no_reply: false,
+            response_schema: None,
         },
     );
     let wire = serde_json::to_value(&frame).unwrap();
@@ -500,4 +503,48 @@ fn hidden_system_reminder_wire_shape_and_legacy_default() {
             ..
         }
     ));
+}
+
+/// A structured turn must put the real JSON Schema on the wire and get it back
+/// intact. The two snapshots above pin the schema-less shape, so together they
+/// prove the field is additive: absent when unused, byte-exact when used.
+#[test]
+fn send_message_with_schema_wire_shape_roundtrips_the_schema() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"title": {"type": "string"}},
+        "required": ["title"],
+        "additionalProperties": false,
+    });
+    let frame = ClientFrame::new(
+        9,
+        ApiRequest::SendMessage {
+            session_id: "s1".into(),
+            content: "hi".into(),
+            images: vec![],
+            system_reminder: None,
+            no_reply: false,
+            response_schema: Some(schema.clone()),
+        },
+    );
+
+    let json = serde_json::to_string(&frame).unwrap();
+    let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        wire["response_schema"], schema,
+        "the schema did not reach the wire: {json}"
+    );
+
+    let decoded: ClientFrame = serde_json::from_str(&json).unwrap();
+    let ApiRequest::SendMessage {
+        response_schema, ..
+    } = decoded.request
+    else {
+        panic!("expected send_message");
+    };
+    assert_eq!(
+        response_schema,
+        Some(schema),
+        "the schema was lost decoding the frame"
+    );
 }

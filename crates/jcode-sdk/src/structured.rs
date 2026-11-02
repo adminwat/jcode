@@ -54,6 +54,11 @@ impl RunStructuredOptions {
             images: self.images.clone(),
             on_event,
             auto_approve: self.auto_approve,
+            // Ask the provider to enforce the schema natively. A provider
+            // without the capability ignores it and the validation loop in
+            // `run_structured` stays the only guarantee, so this is additive
+            // rather than a replacement for it.
+            response_schema: Some(self.schema.clone()),
         }
     }
 }
@@ -532,6 +537,24 @@ mod tests {
             parse_json_from_text("Result: [1, {\"text\": \"a ] brace\"}] done").unwrap(),
             json!([1, {"text": "a ] brace"}])
         );
+    }
+
+    /// The turn options must carry the caller's real schema. This is the only
+    /// place the SDK decides what the provider sees, so a placeholder here
+    /// would silently downgrade every structured call to prompt-only.
+    #[test]
+    fn run_options_carry_the_declared_schema_object() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}},
+            "required": ["title"],
+            "additionalProperties": false,
+        });
+        let options = RunStructuredOptions::new(schema.clone());
+        let run = options.run_options();
+        let sent = run.response_schema.expect("no schema reached the provider");
+        assert_eq!(sent, schema, "the schema was rewritten before sending");
+        assert_eq!(sent["properties"]["tags"]["items"]["type"], "string");
     }
 
     #[test]

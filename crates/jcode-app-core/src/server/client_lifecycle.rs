@@ -176,6 +176,7 @@ struct ProcessingMessage {
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     active_skill: Option<String>,
+    response_schema: Option<serde_json::Value>,
 }
 
 struct ProcessingState<'a> {
@@ -1184,6 +1185,7 @@ pub(super) async fn handle_client(
                 system_reminder,
                 active_skill,
                 no_reply,
+                response_schema,
             } => {
                 if no_reply {
                     append_context_message(
@@ -1218,6 +1220,7 @@ pub(super) async fn handle_client(
                         images,
                         system_reminder,
                         active_skill,
+                        response_schema,
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -1312,6 +1315,7 @@ pub(super) async fn handle_client(
                             images,
                             system_reminder: None,
                             active_skill: None,
+                            response_schema: None,
                         },
                         &client_session_id,
                         &mut ProcessingState {
@@ -3162,6 +3166,7 @@ async fn start_processing_message(
         images,
         system_reminder,
         active_skill,
+        response_schema,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -3241,7 +3246,14 @@ async fn start_processing_message(
         let event_tx = tx.clone();
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
             client_terminal_env,
-            process_message_streaming_mpsc(agent, &content, images, system_reminder, event_tx),
+            process_message_streaming_mpsc_with_schema(
+                agent,
+                &content,
+                images,
+                system_reminder,
+                event_tx,
+                response_schema,
+            ),
         ))
         .catch_unwind()
         .await
@@ -3581,9 +3593,37 @@ pub(super) async fn process_message_streaming_mpsc(
     system_reminder: Option<String>,
     event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    process_message_streaming_mpsc_with_schema(
+        agent,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        None,
+    )
+    .await
+}
+
+/// As [`process_message_streaming_mpsc`], asking the provider to enforce
+/// `response_schema` natively for this turn when it supports it.
+pub(super) async fn process_message_streaming_mpsc_with_schema(
+    agent: Arc<Mutex<Agent>>,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+    response_schema: Option<serde_json::Value>,
+) -> Result<()> {
     let mut agent = agent.lock().await;
-    process_locked_message_streaming_mpsc(&mut agent, content, images, system_reminder, event_tx)
-        .await
+    process_locked_message_streaming_mpsc_with_schema(
+        &mut agent,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        response_schema,
+    )
+    .await
 }
 
 /// Same as [`process_message_streaming_mpsc`] for a caller that already holds
@@ -3596,9 +3636,35 @@ pub(super) async fn process_locked_message_streaming_mpsc(
     system_reminder: Option<String>,
     event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    process_locked_message_streaming_mpsc_with_schema(
+        agent,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        None,
+    )
+    .await
+}
+
+/// As [`process_locked_message_streaming_mpsc`], with a native response schema.
+pub(super) async fn process_locked_message_streaming_mpsc_with_schema(
+    agent: &mut Agent,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+    response_schema: Option<serde_json::Value>,
+) -> Result<()> {
     let session_id = agent.session_id().to_string();
     let result = agent
-        .run_once_streaming_mpsc(content, images, system_reminder, event_tx)
+        .run_once_streaming_mpsc_with_schema(
+            content,
+            images,
+            system_reminder,
+            event_tx,
+            response_schema,
+        )
         .await;
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(

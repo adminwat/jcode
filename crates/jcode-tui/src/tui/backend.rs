@@ -609,6 +609,7 @@ impl RemoteConnection {
             system_reminder,
             active_skill,
             no_reply: false,
+            response_schema: None,
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
@@ -660,7 +661,11 @@ impl RemoteConnection {
     pub async fn request_model_catalog(&mut self) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.send_request(Request::GetModelCatalog { id, subscribe_usage_updates: true }).await?;
+        self.send_request(Request::GetModelCatalog {
+            id,
+            subscribe_usage_updates: true,
+        })
+        .await?;
         Ok(id)
     }
 

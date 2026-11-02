@@ -945,6 +945,11 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 images: Vec::new(),
                 system_reminder: None,
                 active_skill: None,
+                response_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {"summary": {"type": "string"}},
+                    "required": ["summary"],
+                })),
             },
             "session_guard",
             &mut ProcessingState {
@@ -1046,6 +1051,11 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             images: Vec::new(),
             system_reminder: None,
             active_skill: None,
+            response_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"summary": {"type": "string"}},
+                "required": ["summary"],
+            })),
         },
         session_id,
         &mut ProcessingState {
@@ -1171,6 +1181,11 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
                 active_skill: None,
+                response_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {"resumed": {"type": "boolean"}},
+                    "required": ["resumed"],
+                })),
             },
             session_id,
             &mut ProcessingState {
@@ -1271,6 +1286,11 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     images: Vec::new(),
                     system_reminder: None,
                     active_skill: None,
+                    response_schema: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {"started": {"type": "boolean"}},
+                        "required": ["started"],
+                    })),
                 },
                 session_id,
                 &mut ProcessingState {

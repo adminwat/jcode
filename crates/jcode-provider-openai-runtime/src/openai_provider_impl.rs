@@ -20,6 +20,30 @@ impl Provider for OpenAIProvider {
         self.credential_mode_snapshot()
     }
 
+    fn set_response_schema(&self, schema: &serde_json::Value) -> bool {
+        // Only strict-capable schemas get the native field. OpenAI enforces
+        // `json_schema` only with `strict: true`, and rejects the request
+        // outright for constructs it cannot enforce, so a schema that fails
+        // this check must fall back to the caller's own validation loop rather
+        // than be sent in a mode that merely asks for JSON.
+        if !jcode_provider_core::openai_schema::schema_supports_strict(schema) {
+            return false;
+        }
+        let normalized = jcode_provider_core::openai_schema::strict_normalize_schema(schema);
+        *self
+            .response_schema
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(normalized);
+        true
+    }
+
+    fn clear_response_schema(&self) {
+        *self
+            .response_schema
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
     fn set_credential_mode(&self, mode: jcode_provider_core::CredentialMode) -> anyhow::Result<()> {
         OpenAIProvider::set_credential_mode(self, mode)
     }
@@ -1236,6 +1260,10 @@ impl Provider for OpenAIProvider {
             )),
             model_reasoning_efforts: Arc::clone(&self.model_reasoning_efforts),
             service_tier: Arc::new(StdRwLock::new(self.service_tier())),
+            // Per-turn state, not copied: a fork is a different provider
+            // instance and must not inherit a schema from a turn it is not
+            // running.
+            response_schema: Arc::new(StdRwLock::new(None)),
             native_compaction_mode: self.native_compaction_mode,
             native_compaction_threshold_tokens: self.native_compaction_threshold_tokens,
             transport_mode: Arc::clone(&self.transport_mode),

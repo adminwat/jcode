@@ -949,6 +949,7 @@ impl AcpRuntime {
                 system_reminder: None,
                 active_skill: None,
                 no_reply: false,
+                response_schema: None,
             })
             .await;
         if let Err(err) = send_result {
@@ -1273,7 +1274,12 @@ async fn request_history(session: &DaemonSession) -> Result<ServerEvent> {
 
 async fn request_model_catalog(session: &DaemonSession) -> Result<ServerEvent> {
     let id = session.next_id();
-    session.send(&Request::GetModelCatalog { id, subscribe_usage_updates: false }).await?;
+    session
+        .send(&Request::GetModelCatalog {
+            id,
+            subscribe_usage_updates: false,
+        })
+        .await?;
     loop {
         match session.read_event().await? {
             ServerEvent::Ack { .. } => {}

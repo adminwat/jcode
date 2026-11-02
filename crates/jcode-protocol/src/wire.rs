@@ -53,6 +53,11 @@ pub enum Request {
         /// acknowledges it without starting a model turn.
         #[serde(default, skip_serializing_if = "is_false")]
         no_reply: bool,
+        /// JSON Schema the provider should enforce natively for this turn.
+        /// Advisory: providers without a native structured-output field ignore
+        /// it, so the client still validates the response.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_schema: Option<serde_json::Value>,
     },
 
     /// Cancel current generation
@@ -1305,7 +1310,9 @@ pub enum ServerEvent {
 
     /// Usage delta for a route, independent of catalog availability or Agent locks.
     #[serde(rename = "model_usage_updated")]
-    ModelUsageUpdated { route: jcode_provider_core::ModelRoute },
+    ModelUsageUpdated {
+        route: jcode_provider_core::ModelRoute,
+    },
 
     /// Available models updated (pushed after auth changes)
     #[serde(rename = "available_models_updated")]
