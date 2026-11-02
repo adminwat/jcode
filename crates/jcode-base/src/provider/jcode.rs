@@ -207,6 +207,14 @@ impl Provider for JcodeProvider {
         self.inner.native_compaction_mode()
     }
 
+    fn set_response_schema(&self, schema: &serde_json::Value) -> bool {
+        self.inner.set_response_schema(schema)
+    }
+
+    fn clear_response_schema(&self) {
+        self.inner.clear_response_schema();
+    }
+
     fn native_compaction_threshold_tokens(&self) -> Option<usize> {
         self.inner.native_compaction_threshold_tokens()
     }
@@ -401,5 +409,96 @@ mod tests {
                 .iter()
                 .any(|route| route.model.starts_with("gpt-5."))
         );
+    }
+
+    /// `JcodeProvider` wraps a `MultiProvider`. Without forwarding, the turn's
+    /// schema stops at the facade and the request goes out unconstrained.
+    #[test]
+    fn jcode_provider_forwards_the_response_schema_to_its_runtime() {
+        use crate::provider::{ActiveProvider, Provider};
+        use std::sync::Mutex;
+
+        struct RecordingRuntime {
+            set_calls: std::sync::atomic::AtomicUsize,
+            clear_calls: std::sync::atomic::AtomicUsize,
+            schema: Mutex<Option<serde_json::Value>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for RecordingRuntime {
+            async fn complete(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _system: &str,
+                _resume_session_id: Option<&str>,
+            ) -> Result<EventStream> {
+                Err(anyhow::anyhow!(
+                    "the schema forwarding test never completes a call"
+                ))
+            }
+
+            fn name(&self) -> &str {
+                "OpenAI"
+            }
+
+            fn model(&self) -> String {
+                "gpt-5.4".into()
+            }
+
+            fn set_response_schema(&self, schema: &serde_json::Value) -> bool {
+                self.set_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *self.schema.lock().unwrap() = Some(schema.clone());
+                true
+            }
+
+            fn clear_response_schema(&self) {
+                self.clear_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *self.schema.lock().unwrap() = None;
+            }
+
+            fn fork(&self) -> Arc<dyn Provider> {
+                Arc::new(RecordingRuntime {
+                    set_calls: std::sync::atomic::AtomicUsize::new(0),
+                    clear_calls: std::sync::atomic::AtomicUsize::new(0),
+                    schema: Mutex::new(None),
+                })
+            }
+        }
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "answer": { "type": "string" } },
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+
+        let jcode = JcodeProvider::new();
+        let runtime = Arc::new(RecordingRuntime {
+            set_calls: std::sync::atomic::AtomicUsize::new(0),
+            clear_calls: std::sync::atomic::AtomicUsize::new(0),
+            schema: Mutex::new(None),
+        });
+        *jcode.inner.openai.write().unwrap() = Some(runtime.clone());
+        jcode.inner.set_active_provider(ActiveProvider::OpenAI);
+
+        assert!(jcode.set_response_schema(&schema));
+        assert_eq!(
+            runtime.set_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "JcodeProvider must forward the schema instead of dropping it"
+        );
+        assert_eq!(runtime.schema.lock().unwrap().clone(), Some(schema.clone()));
+
+        jcode.clear_response_schema();
+        assert_eq!(
+            runtime
+                .clear_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(runtime.schema.lock().unwrap().clone(), None);
     }
 }

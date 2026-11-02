@@ -2505,6 +2505,36 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn set_response_schema(&self, schema: &serde_json::Value) -> bool {
+        // The schema is enforced by the runtime that actually sends the request,
+        // so it has to reach the active provider rather than stay on the
+        // MultiProvider facade (whose default implementation is a no-op).
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .map(|provider| provider.set_response_schema(schema))
+                .unwrap_or(false),
+            ActiveProvider::Gemini => self
+                .gemini_provider()
+                .map(|provider| provider.set_response_schema(schema))
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    fn clear_response_schema(&self) {
+        // Release on every runtime that can hold a schema, not just the active
+        // one: a turn that failed over left the schema on the runtime it
+        // started on, and releasing only the new active runtime would strand it
+        // there and constrain the next unrelated turn.
+        if let Some(provider) = self.openai_provider() {
+            provider.clear_response_schema();
+        }
+        if let Some(provider) = self.gemini_provider() {
+            provider.clear_response_schema();
+        }
+    }
+
     fn native_compaction_mode(&self) -> Option<String> {
         match self.active_provider() {
             ActiveProvider::OpenAI => self
