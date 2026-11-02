@@ -589,6 +589,7 @@ impl Agent {
                             input: serde_json::Value::Null,
                             intent: None,
                             thought_signature: None,
+                            ..Default::default()
                         });
                         current_tool_input.clear();
                     }
@@ -1394,7 +1395,7 @@ impl Agent {
                 // Spawn tool in its own task so we can detach it to background on Alt+B
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
-                let tool_input_for_spawn = tc.input.clone();
+                let tool_input_for_spawn = tc.execution_input();
                 let tool_handle = tokio::spawn(async move {
                     registry_clone
                         .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
@@ -1650,6 +1651,7 @@ mod tests {
             input,
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }
     }
 

@@ -432,6 +432,11 @@ pub async fn wait_for_callback_async_on_listener(
 
 /// Perform OAuth login for Claude
 pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
+    login_claude_with_org(no_browser, None).await
+}
+
+/// Perform OAuth login for Claude with an optional target organization UUID
+pub async fn login_claude_with_org(no_browser: bool, org_uuid: Option<&str>) -> Result<OAuthTokens> {
     let (verifier, challenge) = generate_pkce();
     if let Ok(code) = std::env::var("JCODE_CLAUDE_AUTH_CODE") {
         let trimmed = code.trim();
@@ -453,8 +458,8 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
         let port = listener.local_addr()?.port();
 
         let redirect_uri = format!("http://localhost:{}/callback", port);
-        let auth_url = claude_auth_url(&redirect_uri, &challenge, &verifier);
-        let manual_auth_url = claude_auth_url(claude::REDIRECT_URI, &challenge, &verifier);
+        let auth_url = claude_auth_url_with_org(&redirect_uri, &challenge, &verifier, org_uuid);
+        let manual_auth_url = claude_auth_url_with_org(claude::REDIRECT_URI, &challenge, &verifier, org_uuid);
 
         eprintln!("\nOpen this URL in your browser:\n");
         eprintln!("{}\n", auth_url);
@@ -520,7 +525,7 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
     }
 
     // Last-resort manual flow if localhost callback binding is unavailable.
-    let auth_url = claude_auth_url(claude::REDIRECT_URI, &challenge, &verifier);
+    let auth_url = claude_auth_url_with_org(claude::REDIRECT_URI, &challenge, &verifier, org_uuid);
 
     eprintln!("\nOpen this URL in your browser:\n");
     eprintln!("{}\n", auth_url);
@@ -552,7 +557,27 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
 }
 
 pub fn claude_auth_url(redirect_uri: &str, challenge: &str, state: &str) -> String {
-    format!(
+    claude_auth_url_with_org(redirect_uri, challenge, state, None)
+}
+
+pub fn claude_auth_url_with_org(
+    redirect_uri: &str,
+    challenge: &str,
+    state: &str,
+    org_uuid: Option<&str>,
+) -> String {
+    let effective_org = org_uuid
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            std::env::var("JCODE_CLAUDE_ORG_UUID")
+                .or_else(|_| std::env::var("CLAUDE_CODE_ORGANIZATION_UUID"))
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        });
+
+    let mut url = format!(
         "{}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
         claude::AUTHORIZE_URL,
         claude::CLIENT_ID,
@@ -560,7 +585,12 @@ pub fn claude_auth_url(redirect_uri: &str, challenge: &str, state: &str) -> Stri
         urlencoding::encode(claude::SCOPES),
         challenge,
         state
-    )
+    );
+    if let Some(org) = effective_org {
+        url.push_str("&orgUUID=");
+        url.push_str(urlencoding::encode(org.trim()).as_ref());
+    }
+    url
 }
 
 /// Parse Claude auth input.
@@ -941,21 +971,42 @@ pub fn save_claude_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Resu
     Ok(())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct ClaudeProfileResponse {
     #[serde(default)]
     account: ClaudeProfileAccount,
+    #[serde(default)]
+    organization: Option<ClaudeProfileOrganization>,
 }
 
 #[derive(Deserialize, Default)]
 struct ClaudeProfileAccount {
+    #[serde(default)]
+    uuid: Option<String>,
+    #[serde(default)]
     email: Option<String>,
 }
 
-async fn fetch_claude_profile_email_at_url(
+#[derive(Deserialize, Default)]
+struct ClaudeProfileOrganization {
+    #[serde(default)]
+    uuid: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ClaudeProfileMetadata {
+    pub account_uuid: Option<String>,
+    pub email: Option<String>,
+    pub organization_uuid: Option<String>,
+    pub organization_name: Option<String>,
+}
+
+async fn fetch_claude_profile_metadata_at_url(
     access_token: &str,
     profile_url: &str,
-) -> Result<Option<String>> {
+) -> Result<ClaudeProfileMetadata> {
     let client = crate::provider::shared_http_client();
     let resp = client
         .get(profile_url)
@@ -976,7 +1027,25 @@ async fn fetch_claude_profile_email_at_url(
     }
 
     let profile: ClaudeProfileResponse = resp.json().await?;
-    Ok(profile.account.email)
+    Ok(ClaudeProfileMetadata {
+        account_uuid: profile.account.uuid,
+        email: profile.account.email,
+        organization_uuid: profile.organization.as_ref().and_then(|o| o.uuid.clone()),
+        organization_name: profile.organization.as_ref().and_then(|o| o.name.clone()),
+    })
+}
+
+/// Fetch profile metadata for a Claude account including email and organization details.
+pub async fn fetch_claude_profile(access_token: &str) -> Result<ClaudeProfileMetadata> {
+    fetch_claude_profile_metadata_at_url(access_token, claude::PROFILE_URL).await
+}
+
+async fn fetch_claude_profile_email_at_url(
+    access_token: &str,
+    profile_url: &str,
+) -> Result<Option<String>> {
+    let meta = fetch_claude_profile_metadata_at_url(access_token, profile_url).await?;
+    Ok(meta.email)
 }
 
 /// Fetch profile metadata for a Claude account and persist any discovered fields.

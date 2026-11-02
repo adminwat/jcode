@@ -71,7 +71,7 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         id: "tool-1".to_string(),
         name: "read".to_string(),
         input: serde_json::json!({"file_path": "src/main.rs"}),
-        intent: None, thought_signature: None, };
+        intent: None, thought_signature: None,  ..Default::default() };
 
     app.push_display_message(DisplayMessage {
         role: "tool".to_string(),
@@ -132,6 +132,7 @@ fn test_replace_latest_tool_display_message_removes_background_lifecycle_card() 
             input: serde_json::json!({"command": "cargo test"}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     });
     let before = app.display_messages_version;
@@ -222,6 +223,7 @@ fn test_incremental_display_message_counts_match_full_recompute() {
                     input: serde_json::json!({"file_path": format!("src/file_{i}.rs")}),
                     intent: None,
                     thought_signature: None,
+                    ..Default::default()
                 }),
             });
         }

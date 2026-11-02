@@ -183,7 +183,7 @@ fn test_pinned_content_uses_left_splitter_instead_of_rounded_box() {
                 "file_path": "src/demo.rs",
                 "content": "fn demo() {}\n"
             }),
-            intent: None, thought_signature: None, }),
+            intent: None, thought_signature: None,  ..Default::default() }),
     }];
     app.bump_display_messages_version();
 
@@ -226,7 +226,7 @@ fn test_file_diff_uses_left_splitter_instead_of_rounded_box() {
                 "file_path": file_path.display().to_string(),
                 "content": "fn demo() {\n    println!(\"hi\");\n}\n"
             }),
-            intent: None, thought_signature: None, }),
+            intent: None, thought_signature: None,  ..Default::default() }),
     }];
     app.bump_display_messages_version();
 

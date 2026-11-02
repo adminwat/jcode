@@ -787,6 +787,7 @@ impl JcodeClient {
             system_reminder: Some(reminder.to_string()),
             images: Vec::new(),
             no_reply: false,
+            response_schema: None,
         })
     }
 
@@ -804,6 +805,19 @@ impl JcodeClient {
         images: Vec<(String, String)>,
         wait_for_accept: Option<Duration>,
     ) -> Result<()> {
+        self.send_message_with_schema(session_id, content, images, wait_for_accept, None)
+    }
+
+    /// [`JcodeClient::send_message`], additionally asking the provider to
+    /// enforce `response_schema` natively for this turn when it can.
+    fn send_message_with_schema(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        wait_for_accept: Option<Duration>,
+        response_schema: Option<serde_json::Value>,
+    ) -> Result<()> {
         // Subscribe *before* writing: an ack that lands between the write and
         // the subscribe would otherwise be missed and time out a healthy turn.
         let stream = wait_for_accept.map(|_| self.events(Some(session_id)));
@@ -813,6 +827,7 @@ impl JcodeClient {
             system_reminder: None,
             images,
             no_reply: false,
+            response_schema,
         })?;
         if let (Some(stream), Some(timeout)) = (stream, wait_for_accept) {
             let deadline = std::time::Instant::now() + timeout;
@@ -875,7 +890,13 @@ impl JcodeClient {
         {
             ApiEvent::History {
                 messages, images, ..
-            } => Ok((messages, images)),
+            } => {
+                let pruned = messages
+                    .into_iter()
+                    .map(|msg| msg.prune_conversational_commentary())
+                    .collect();
+                Ok((pruned, images))
+            }
             other => Err(unexpected("history", &other)),
         }
     }
@@ -892,7 +913,13 @@ impl JcodeClient {
             })?
             .event
         {
-            ApiEvent::History { messages, .. } => Ok(messages),
+            ApiEvent::History { messages, .. } => {
+                let pruned = messages
+                    .into_iter()
+                    .map(|msg| msg.prune_conversational_commentary())
+                    .collect();
+                Ok(pruned)
+            }
             other => Err(unexpected("history", &other)),
         }
     }
@@ -1196,11 +1223,12 @@ impl JcodeClient {
     /// of one turn out. Streaming consumers should use `events()` instead.
     pub fn run(&self, session_id: &str, content: &str, options: RunOptions) -> Result<TurnResult> {
         let stream = self.events(Some(session_id));
-        self.send_message(
+        self.send_message_with_schema(
             session_id,
             content,
             options.images.clone(),
             Some(Duration::from_secs(10)),
+            options.response_schema.clone(),
         )?;
         let mut result = TurnResult::default();
         while let Some(event) = stream.next() {
@@ -1221,6 +1249,8 @@ impl JcodeClient {
                     name,
                     output,
                     error,
+                    strategic_reasoning_and_analysis: String::new(),
+                    tool_invocation_payload: String::new(),
                 }),
                 ApiEvent::TokenUsage {
                     input,
@@ -1265,6 +1295,13 @@ pub struct RunOptions {
     /// Auto-answer permission prompts. Only meaningful when the server
     /// advertises the `permissions` capability.
     pub auto_approve: bool,
+    /// Ask the provider to enforce this JSON Schema natively for the turn.
+    ///
+    /// Advisory: a provider without a native structured-output field, or one
+    /// whose field cannot enforce this particular schema, ignores it. Callers
+    /// must still validate the response, which is why
+    /// [`JcodeClient::run_structured`] keeps its own validation loop.
+    pub response_schema: Option<serde_json::Value>,
 }
 
 /// Runtime identity and protocol metadata returned by [`JcodeClient::get_runtime_info`].
@@ -1321,12 +1358,14 @@ pub struct TurnResult {
     pub usage: Option<Usage>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolCall {
     pub call_id: String,
     pub name: String,
     pub output: String,
     pub error: Option<String>,
+    pub strategic_reasoning_and_analysis: String,
+    pub tool_invocation_payload: String,
 }
 
 /// Provider-reported counters. Cache counters may be separate from input

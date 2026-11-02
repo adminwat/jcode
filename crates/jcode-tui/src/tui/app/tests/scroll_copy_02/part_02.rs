@@ -267,6 +267,7 @@ fn make_edit_badge_test_app(
                 }),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
         ),
     ];
@@ -517,6 +518,7 @@ fn test_expand_badge_shortcut_opens_full_inline_from_non_inline_mode() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         },
     ));
     app.bump_display_messages_version();
@@ -548,6 +550,7 @@ fn test_expand_badge_shortcut_uses_display_messages_when_edit_count_is_stale() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         },
     ));
     app.bump_display_messages_version();
@@ -1087,6 +1090,7 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
                 input: serde_json::json!({"file_path": "shot.png"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
         ),
     ];
@@ -1240,6 +1244,7 @@ fn test_real_draw_never_emits_inline_image_marker_text() {
                 input: serde_json::json!({"file_path": "shot.png"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
         ),
     ];

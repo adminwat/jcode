@@ -756,6 +756,7 @@ fn read_tool_call(tool_id: &str) -> crate::message::ToolCall {
         input: serde_json::json!({"file_path": "shot.png"}),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     }
 }
 

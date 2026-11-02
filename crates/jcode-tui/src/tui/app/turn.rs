@@ -538,12 +538,18 @@ impl App {
                                             id: id.clone(),
                                             name: name.clone(),
                                             input: serde_json::Value::Null,
-                                            intent: None, thought_signature: None, });
+                                            intent: None,
+                                            thought_signature: None,
+                                            ..Default::default()
+                                        });
                                         current_tool = Some(ToolCall {
                                             id,
                                             name,
                                             input: serde_json::Value::Null,
-                                            intent: None, thought_signature: None, });
+                                            intent: None,
+                                            thought_signature: None,
+                                            ..Default::default()
+                                        });
                                         current_tool_input.clear();
                                         if eager_stream_redraw {
                                             status_spinner_renderer.draw_full(self, terminal)?;
@@ -922,7 +928,10 @@ impl App {
                                             id: id.clone(),
                                             name: crate::message::GENERATED_IMAGE_TOOL_NAME.to_string(),
                                             input,
-                                            intent: Some("OpenAI native image generation".to_string()), thought_signature: None, };
+                                            intent: Some("OpenAI native image generation".to_string()),
+                                            thought_signature: None,
+                                            ..Default::default()
+                                        };
                                         let summary = crate::message::generated_image_summary(
                                             &path,
                                             metadata_path.as_deref(),

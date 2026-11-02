@@ -2470,17 +2470,26 @@ fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
         {"id":"a","role":"assistant","content":[{"type":"text","text":"answer"}],
             "token_usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":7,"cache_creation_input_tokens":8}}
     ])).unwrap();
-    let legacy: Vec<_> = jcode_base::session::render_messages(&session).into_iter()
+    let legacy: Vec<_> = jcode_base::session::render_messages(&session)
+        .into_iter()
         .map(|row| jcode_base::protocol::HistoryMessage {
-            role: row.role, content: row.content, tool_calls: None, tool_data: row.tool_data,
+            role: row.role,
+            content: row.content,
+            tool_calls: None,
+            tool_data: row.tool_data,
             response_stats: row.response_stats,
-        }).collect();
+        })
+        .collect();
     let mut state = state_with_session();
     let out = state.api_request_to_legacy(&json!({"req":"get_history", "id":46}));
-    let Outbound::Legacy(request) = &out[0] else { panic!("expected history request") };
+    let Outbound::Legacy(request) = &out[0] else {
+        panic!("expected history request")
+    };
     let frames = state.legacy_event_to_api(&json!({"type":"history", "id":request["id"],
         "messages":legacy,"activity":{"is_processing":false}}));
-    let ApiEvent::History { messages, .. } = &frames[0].event else { panic!("expected history") };
+    let ApiEvent::History { messages, .. } = &frames[0].event else {
+        panic!("expected history")
+    };
     let stats = messages[1].response_stats.as_ref().unwrap();
     assert_eq!(stats.input_tokens, Some(123));
     assert_eq!(stats.output_tokens, Some(45));
@@ -2665,4 +2674,47 @@ fn hidden_system_reminder_is_forwarded_without_visible_content_or_no_reply() {
         panic!("message")
     };
     assert!(message.get("system_reminder").is_none());
+}
+
+/// The SDK asks for native structured output on `send_message`; the daemon
+/// only sees the legacy `message` frame, so the schema has to survive this
+/// hop. If it is dropped here the request silently degrades to prompt-and-pray
+/// while every layer above reports success.
+#[test]
+fn send_message_forwards_response_schema_to_legacy_message() {
+    let mut state = state_with_session();
+    let schema = json!({
+        "type": "object",
+        "properties": {"title": {"type": "string"}},
+        "required": ["title"],
+        "additionalProperties": false,
+    });
+    let out = state.api_request_to_legacy(&json!({
+        "req": "send_message",
+        "id": 2,
+        "session_id": "s1",
+        "content": "hi",
+        "response_schema": schema,
+    }));
+    let Outbound::Legacy(message) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert_eq!(message["response_schema"], schema);
+}
+
+/// A turn that sets no schema must not gain the key at all, so the legacy
+/// frame stays byte-identical for every existing caller.
+#[test]
+fn send_message_without_schema_omits_the_key() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(
+        &json!({"req": "send_message", "id": 2, "session_id": "s1", "content": "hi"}),
+    );
+    let Outbound::Legacy(message) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert!(
+        message.get("response_schema").is_none(),
+        "unschemaed message gained the key: {message}"
+    );
 }

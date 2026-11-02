@@ -470,7 +470,9 @@ impl BridgeState {
                 vec![
                     Outbound::Legacy(subscribe),
                     Outbound::Legacy(json!({"type": "state", "id": state_id})),
-                    Outbound::Legacy(json!({"type": "get_model_catalog", "id": catalog_id, "subscribe_usage_updates": true})),
+                    Outbound::Legacy(
+                        json!({"type": "get_model_catalog", "id": catalog_id, "subscribe_usage_updates": true}),
+                    ),
                 ]
             }
             "send_message" => {
@@ -491,6 +493,9 @@ impl BridgeState {
                 }
                 if let Some(reminder) = request["system_reminder"].as_str() {
                     message["system_reminder"] = json!(reminder);
+                }
+                if let Some(schema) = request.get("response_schema").filter(|v| !v.is_null()) {
+                    message["response_schema"] = schema.clone();
                 }
                 if let Some(images) = request["images"].as_array()
                     && !images.is_empty()

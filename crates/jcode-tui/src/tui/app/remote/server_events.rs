@@ -453,6 +453,7 @@ mod history_dedup_tests {
             input: serde_json::json!({"command": "ls"}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         });
         assert_ne!(fp, history_payload_fingerprint(&tool));
 
@@ -702,6 +703,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 input: serde_json::Value::Null,
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             });
             eager_stream_redraw
         }
@@ -721,6 +723,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 input: parsed_input.clone(),
                 intent: ToolCall::intent_from_input(&parsed_input),
                 thought_signature: None,
+                ..Default::default()
             };
             if let Some(key) = App::experimental_feature_key_for_tool(&tool_call) {
                 app.note_experimental_feature_use(key);

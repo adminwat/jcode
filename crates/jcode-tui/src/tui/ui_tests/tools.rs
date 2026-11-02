@@ -59,6 +59,7 @@ fn test_patch_headers_preserve_line_counts_and_token_severity() {
             input: serde_json::json!({"patch_text": patch}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         };
         for (tokens, color) in [
             (0, rgb(118, 118, 118)),
@@ -150,6 +151,7 @@ fn test_token_badges_survive_full_terminal_draw() {
                                 input,
                                 intent: None,
                                 thought_signature: None,
+                                ..Default::default()
                             }),
                         }],
                         messages_version: version,
@@ -312,6 +314,7 @@ fn test_render_tool_message_batch_flat_subcall_params_include_read_details() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -356,7 +359,7 @@ fn test_render_tool_message_batch_subcalls_show_individual_token_badges() {
                         {"tool": "grep", "pattern": "TODO", "path": "src"}
                     ]
                 }),
-                intent: None, thought_signature: None, }),
+                intent: None, thought_signature: None,  ..Default::default() }),
         };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -395,7 +398,7 @@ fn test_render_tool_message_batch_first_subcall_token_badge_with_timing_prefix()
                     {"tool": "bash", "command": "echo second"}
                 ]
             }),
-            intent: None, thought_signature: None, }),
+            intent: None, thought_signature: None,  ..Default::default() }),
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -431,6 +434,7 @@ fn test_render_tool_message_batch_last_subcall_keeps_token_badge_without_trailin
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -478,6 +482,7 @@ Completed: 2 succeeded, 1 failed"
             }),
             intent: Some("Inspect schemas".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -527,7 +532,7 @@ fn test_render_tool_message_batch_all_failed_marks_all_children_failed() {
                     {"tool": "agentgrep"}
                 ]
             }),
-            intent: None, thought_signature: None, }),
+            intent: None, thought_signature: None,  ..Default::default() }),
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -562,6 +567,7 @@ fn test_tool_summary_gmail_actions() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     let summary = tools_ui::get_tool_summary_with_budget(&search, 50, Some(50));
     assert!(summary.starts_with("search "), "summary={summary:?}");
@@ -576,6 +582,7 @@ fn test_tool_summary_gmail_actions() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     let summary = tools_ui::get_tool_summary_with_budget(&read, 50, Some(50));
     assert!(summary.starts_with("read "), "summary={summary:?}");
@@ -590,6 +597,7 @@ fn test_tool_summary_gmail_actions() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     let summary = tools_ui::get_tool_summary_with_budget(&send, 50, Some(50));
     assert!(
@@ -603,6 +611,7 @@ fn test_tool_summary_gmail_actions() {
         input: serde_json::json!({ "action": "labels" }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     let summary = tools_ui::get_tool_summary_with_budget(&bare, 50, Some(50));
     assert_eq!(summary, "labels");
@@ -621,6 +630,7 @@ fn test_tool_activity_detail_prefixes_intent_for_gmail_and_browser() {
         }),
         intent: Some("Check unread mail".to_string()),
         thought_signature: None,
+        ..Default::default()
     };
     let detail = tools_ui::get_tool_activity_detail(&gmail);
     assert!(detail.starts_with("Check unread mail"), "detail={detail:?}");
@@ -636,6 +646,7 @@ fn test_tool_activity_detail_prefixes_intent_for_gmail_and_browser() {
         }),
         intent: Some("Open docs page".to_string()),
         thought_signature: None,
+        ..Default::default()
     };
     let detail = tools_ui::get_tool_activity_detail(&browser);
     assert!(detail.starts_with("Open docs page"), "detail={detail:?}");
@@ -656,6 +667,7 @@ fn test_tool_activity_detail_hides_technical_summary_by_default() {
         }),
         intent: Some("Check unread mail".to_string()),
         thought_signature: None,
+        ..Default::default()
     };
     let detail = tools_ui::get_tool_activity_detail(&gmail);
     assert_eq!(detail, "Check unread mail");
@@ -713,6 +725,7 @@ fn test_tool_summary_covers_action_shaped_tools_and_fallback() {
             input,
             intent: None,
             thought_signature: None,
+            ..Default::default()
         };
         let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(60));
         assert!(
@@ -734,6 +747,7 @@ fn test_tool_summary_read_supports_start_line_end_line() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(40));
@@ -758,6 +772,7 @@ fn test_render_tool_message_batch_includes_start_end_read_details() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -789,6 +804,7 @@ fn test_tool_summary_path_truncation_keeps_filename_tail() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(28));
@@ -810,6 +826,7 @@ fn test_tool_summary_grep_truncation_prefers_middle() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(34));
@@ -836,6 +853,7 @@ fn test_tool_summary_bash_truncation_keeps_start_and_end() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 32, Some(34));
@@ -859,6 +877,7 @@ fn test_tool_summary_bash_keeps_full_command_when_width_fits() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 32, Some(160));
@@ -880,6 +899,7 @@ fn test_render_batch_subcall_line_keeps_full_bash_summary_when_row_fits() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let line =
@@ -903,6 +923,7 @@ fn test_render_batch_subcall_line_shows_model_provided_intent() {
         input: serde_json::json!({"file_path": "src/tui/ui_messages.rs"}),
         intent: Some("Inspect completed batch rendering".to_string()),
         thought_signature: None,
+        ..Default::default()
     };
 
     let line =
@@ -927,6 +948,7 @@ fn test_render_batch_subcall_line_hides_technical_detail_by_default() {
         input: serde_json::json!({"file_path": "src/tui/ui_messages.rs"}),
         intent: Some("Inspect completed batch rendering".to_string()),
         thought_signature: None,
+        ..Default::default()
     };
 
     let line =
@@ -954,6 +976,7 @@ fn test_agentgrep_summary_uses_default_grep_mode_query() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(120));
@@ -972,6 +995,7 @@ fn test_render_batch_subcall_line_shows_first_subcall_token_badge() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let line = tools_ui::render_batch_subcall_line(
@@ -1005,6 +1029,7 @@ fn test_common_tool_summaries_keep_full_text_when_row_budget_fits() {
                 }),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
             "src/tui/ui_messages.rs:120-160",
         ),
@@ -1018,6 +1043,7 @@ fn test_common_tool_summaries_keep_full_text_when_row_budget_fits() {
                 }),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
             "'render_batch_subcall_line' in src/tui",
         ),
@@ -1030,6 +1056,7 @@ fn test_common_tool_summaries_keep_full_text_when_row_budget_fits() {
                 }),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
             "'src/tui/**/*.rs'",
         ),
@@ -1042,6 +1069,7 @@ fn test_common_tool_summaries_keep_full_text_when_row_budget_fits() {
                 }),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
             "https://example.com/docs/api/reference",
         ),
@@ -1055,6 +1083,7 @@ fn test_common_tool_summaries_keep_full_text_when_row_budget_fits() {
                 }),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
             "open src/tui/ui.rs",
         ),
@@ -1068,6 +1097,7 @@ fn test_common_tool_summaries_keep_full_text_when_row_budget_fits() {
                 }),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
             "recall 'tool summary truncation'",
         ),
@@ -1080,6 +1110,7 @@ fn test_common_tool_summaries_keep_full_text_when_row_budget_fits() {
                 }),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
             "'rust unicode width truncation examples'",
         ),
@@ -1092,6 +1123,7 @@ fn test_common_tool_summaries_keep_full_text_when_row_budget_fits() {
                 }),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
             "tester:list",
         ),
@@ -1112,6 +1144,7 @@ fn test_debug_socket_summary_hides_transient_missing_input() {
         input: serde_json::Value::Null,
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(200));
@@ -1129,6 +1162,7 @@ fn test_tool_summary_browser_open_shows_url() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(200));
@@ -1150,6 +1184,7 @@ fn test_tool_summary_browser_type_hides_typed_text() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(200));
@@ -1171,6 +1206,7 @@ fn test_tool_summary_browser_type_without_selector_still_hides_text() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(200));
@@ -1189,6 +1225,7 @@ fn test_tool_summary_browser_eval_truncates_script() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(34));
@@ -1208,6 +1245,7 @@ fn test_tool_summary_agentgrep_smart_uses_terms_subject_relation() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(200));
@@ -1225,6 +1263,7 @@ fn test_tool_summary_agentgrep_smart_uses_query_subject_relation() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(200));
@@ -1242,6 +1281,7 @@ fn test_tool_summary_bg_infers_wait_from_intent_when_action_missing() {
         }),
         intent: Some("Wait for library tests".to_string()),
         thought_signature: None,
+        ..Default::default()
     };
 
     let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(200));
@@ -1271,6 +1311,7 @@ fn test_render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -1305,6 +1346,7 @@ fn test_render_tool_message_keeps_token_badge_when_intent_is_truncated() {
                     .to_string(),
             ),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -1336,6 +1378,7 @@ fn test_render_tool_message_with_intent_never_adds_second_command_line() {
             }),
             intent: Some("Launch exactly one paid Opus canary".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -1372,6 +1415,7 @@ fn test_render_tool_message_keeps_bash_command_visible_when_row_is_narrow() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -1413,6 +1457,7 @@ fn test_action_tools_hide_missing_placeholder_for_streaming_input() {
                 input: input.clone(),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             };
 
             let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(200));
@@ -1447,6 +1492,7 @@ fn test_action_tools_degrade_to_tool_name_when_action_absent() {
             input,
             intent: None,
             thought_signature: None,
+            ..Default::default()
         };
 
         let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(200));
@@ -1473,6 +1519,7 @@ fn test_activity_detail_prefers_intent_and_appends_summary() {
         }),
         intent: Some("Spin up a worker for the parser fix".to_string()),
         thought_signature: None,
+        ..Default::default()
     };
 
     let detail = tools_ui::get_tool_activity_detail(&tool);
@@ -1501,6 +1548,7 @@ fn test_activity_detail_falls_back_to_input_intent_field() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let detail = tools_ui::get_tool_activity_detail(&tool);
@@ -1519,6 +1567,7 @@ fn test_activity_detail_without_intent_matches_summary() {
         input: serde_json::json!({ "action": "dm", "to_session": "worker-1", "message": "hello" }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let detail = tools_ui::get_tool_activity_detail(&tool);

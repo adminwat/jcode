@@ -95,6 +95,7 @@ impl Agent {
             input: arguments,
             intent,
             thought_signature: None,
+            ..Default::default()
         });
 
         true

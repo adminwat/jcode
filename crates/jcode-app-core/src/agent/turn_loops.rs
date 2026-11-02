@@ -346,6 +346,7 @@ impl Agent {
                             input: serde_json::Value::Null,
                             intent: None,
                             thought_signature: None,
+                            ..Default::default()
                         });
                         current_tool_input.clear();
                     }
@@ -1068,7 +1069,7 @@ impl Agent {
                     model: Some(self.provider.model()),
                 }));
 
-                let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
+                let result = self.registry.execute(&tc.name, tc.execution_input(), ctx).await;
                 crate::telemetry::record_tool_call();
                 self.unlock_tools_if_needed(&tc.name);
                 let tool_elapsed = tool_start.elapsed();

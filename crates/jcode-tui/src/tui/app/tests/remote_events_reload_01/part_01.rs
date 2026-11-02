@@ -747,6 +747,7 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
         input: serde_json::json!({}),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     });
     // The client-side /rewind path arms the pending notice before the server's
     // History redelivery arrives (remote/key_handling.rs).
@@ -1542,7 +1543,7 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
         id: "tool_1".to_string(),
         name: "bash".to_string(),
         input: serde_json::Value::Null,
-        intent: None, thought_signature: None, });
+        intent: None, thought_signature: None,  ..Default::default() });
     app.interleave_message = Some("queued interrupt".to_string());
     app.pending_soft_interrupts
         .push("pending soft interrupt".to_string());

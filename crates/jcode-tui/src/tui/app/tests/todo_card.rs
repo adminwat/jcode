@@ -305,6 +305,7 @@ fn pinned_todos_hide_todo_tool_messages_from_the_transcript() {
                 input: serde_json::json!({"todos": []}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
         ),
         DisplayMessage::tool(
@@ -315,6 +316,7 @@ fn pinned_todos_hide_todo_tool_messages_from_the_transcript() {
                 input: serde_json::json!({"file_path": "README.md"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
         ),
     ];

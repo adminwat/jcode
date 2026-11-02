@@ -484,6 +484,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         input: input.clone(),
                         intent: ToolCall::intent_from_input(input),
                         thought_signature: thought_signature.clone(),
+                        ..Default::default()
                     };
                     tool_map.insert(id.clone(), tool_call);
                     tool_calls.push(name.clone());
@@ -517,6 +518,7 @@ pub fn render_messages_and_images_with_compacted_history(
                             input: serde_json::Value::Null,
                             intent: None,
                             thought_signature: None,
+                            ..Default::default()
                         })
                     });
                     current_tool = tool_data.clone();

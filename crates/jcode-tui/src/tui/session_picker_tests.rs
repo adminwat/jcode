@@ -1891,6 +1891,7 @@ fn test_preview_structured_messages_stay_left_aligned() {
                 input: serde_json::json!({"command": "echo alignment"}),
                 intent: Some("Check structured preview alignment".to_string()),
                 thought_signature: None,
+                ..Default::default()
             }),
         });
     }

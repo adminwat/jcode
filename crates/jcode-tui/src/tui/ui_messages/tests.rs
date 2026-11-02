@@ -942,6 +942,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
             input: serde_json::json!({ "todos": todos, "goals": goals }),
             intent: Some("Track todo card work".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -1029,6 +1030,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
             input: serde_json::Value::Null,
             intent: Some("Refine the todo feedback loop".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -1146,6 +1148,7 @@ fn render_todo_plan_update_card_shows_only_changed_intent_fields() {
             input: serde_json::Value::Null,
             intent: Some("Reassess the user's intent".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -1269,6 +1272,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
             input: serde_json::Value::Null,
             intent: Some("Track implementation and browser verification".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     );
     assert!(initial.contains("pelican-bike-animation"), "{initial}");
@@ -1369,6 +1373,7 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
                 "Inspect starter files and strengthen measurable visual goals".to_string(),
             ),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -1440,6 +1445,7 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
             input: serde_json::json!({ "todos": todos, "goals": goals }),
             intent: Some("Complete the full user outcome".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -1523,7 +1529,7 @@ fn render_tool_message_uses_scheduled_card() {
                 "wake_in_minutes": 1,
                 "target": "resume"
             }),
-            intent: None, thought_signature: None, }),
+            intent: None, thought_signature: None,  ..Default::default() }),
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
@@ -1980,6 +1986,7 @@ fn render_tool_message_prefers_subagent_title_with_model() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2011,6 +2018,7 @@ fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
             }),
             intent: Some("Verify compact progress card".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2042,6 +2050,7 @@ fn render_tool_message_hides_technical_preview_by_default() {
             }),
             intent: Some("Verify compact progress card".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2078,6 +2087,7 @@ fn render_tool_message_keeps_error_summary_when_details_hidden() {
             }),
             intent: Some("Run the test suite".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2104,6 +2114,7 @@ fn render_tool_message_shows_token_badge() {
             input: serde_json::json!({"file_path": "src/main.rs"}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2133,6 +2144,7 @@ fn render_tool_message_hides_bash_output() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2158,6 +2170,7 @@ fn render_tool_message_shows_bash_output_when_enabled() {
             input: serde_json::json!({"command": "printf output"}),
             intent: Some("Print output".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2186,6 +2199,7 @@ fn gmail_draft_message(content: &str, input: serde_json::Value) -> DisplayMessag
             input,
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     }
 }
@@ -2345,6 +2359,7 @@ fn render_batch_tool_message_shows_nested_gmail_draft_card() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2392,6 +2407,7 @@ fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2427,6 +2443,7 @@ fn discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage 
             input,
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     }
 }
@@ -2515,6 +2532,7 @@ fn batched_discovery_renders_without_disclosure_notice() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2698,6 +2716,7 @@ fn render_tool_message_colors_high_token_badge() {
             input: serde_json::json!({"file_path": "src/main.rs"}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2729,7 +2748,7 @@ fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
                     {"old_string": "old line\n", "new_string": "new line\n"}
                 ]
             }),
-            intent: None, thought_signature: None, }),
+            intent: None, thought_signature: None,  ..Default::default() }),
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -2761,6 +2780,7 @@ fn render_tool_message_labels_single_file_apply_patch_diff() {
             }),
             intent: Some("Update example behavior".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2793,6 +2813,7 @@ fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
             }),
             intent: Some("Update both examples".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2833,6 +2854,7 @@ fn render_tool_message_shows_numbered_write_result_diff_after_input_compaction()
             input: serde_json::json!({"file_path": "/tmp/head-to-head.html"}),
             intent: Some("Create an honest data-driven benchmark comparison page".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2876,6 +2898,7 @@ fn render_tool_message_never_draws_an_empty_edit_diff_frame() {
                 input: serde_json::json!({"file_path": "demo.txt"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             }),
         };
 
@@ -2907,6 +2930,7 @@ fn render_tool_message_marks_failed_apply_patch_without_empty_diff() {
             input: serde_json::json!({"file_path": "/tmp/main.rs"}),
             intent: Some("Replace the benchmark placeholder".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2949,6 +2973,7 @@ fn render_tool_message_inline_mode_truncates_large_diffs() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2993,6 +3018,7 @@ fn render_tool_message_full_inline_mode_shows_full_diff() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -3035,6 +3061,7 @@ fn render_tool_message_memory_recall_centered_mode_left_aligns_with_padding() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -3089,6 +3116,7 @@ fn render_tool_message_memory_store_centered_mode_left_aligns_with_padding() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -3134,6 +3162,7 @@ fn render_tool_message_shows_swarm_spawn_prompt_summary() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -3174,6 +3203,7 @@ fn render_tool_message_batch_subcall_shows_swarm_dm_details() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -3330,6 +3360,7 @@ fn render_empty_todo_tool_result_collapses_to_compact_line() {
             input: serde_json::json!({}),
             intent: Some("Read the todo list".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 

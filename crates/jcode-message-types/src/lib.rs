@@ -12,6 +12,26 @@ pub struct ToolCall {
     /// later turns so the Cloud Code backend accepts the function call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+    /// Strategic reasoning and architectural analysis decoupled from execution.
+    #[serde(default)]
+    pub strategic_reasoning_and_analysis: String,
+    /// Raw invocation payload (e.g. bash command or tool input).
+    #[serde(default)]
+    pub tool_invocation_payload: String,
+}
+
+impl ToolCall {
+    /// Return the execution payload. If `tool_invocation_payload` is set, maps strictly from it;
+    /// otherwise falls back to `input`.
+    pub fn execution_input(&self) -> serde_json::Value {
+        if !self.tool_invocation_payload.is_empty() {
+            if let Ok(val) = serde_json::from_str(&self.tool_invocation_payload) {
+                return val;
+            }
+            return serde_json::Value::String(self.tool_invocation_payload.clone());
+        }
+        self.input.clone()
+    }
 }
 
 /// Tool definition advertised to model providers.

@@ -392,6 +392,35 @@ pub struct HistoryMessage {
     pub content: String,
 }
 
+impl HistoryMessage {
+    /// Prune conversational commentary, retaining only machine-verifiable data structures.
+    pub fn prune_conversational_commentary(&self) -> Self {
+        let pruned_content = if self.role == "tool" {
+            self.content
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    trimmed.starts_with('{')
+                        || trimmed.starts_with('[')
+                        || trimmed.contains("exit code")
+                        || trimmed.contains("status")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else if self.role == "system" {
+            self.content.clone()
+        } else {
+            String::new()
+        };
+
+        Self {
+            response_stats: self.response_stats.clone(),
+            role: self.role.clone(),
+            content: pruned_content,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RenderedImageSource {

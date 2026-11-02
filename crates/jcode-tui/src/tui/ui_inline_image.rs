@@ -1743,6 +1743,7 @@ mod tests {
             input: serde_json::Value::Null,
             intent: None,
             thought_signature: None,
+            ..Default::default()
         };
         let messages = vec![
             DisplayMessage::user("show me"),

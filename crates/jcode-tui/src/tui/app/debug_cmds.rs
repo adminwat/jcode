@@ -307,6 +307,7 @@ impl App {
                         }),
                         intent: None,
                         thought_signature: None,
+                        ..Default::default()
                     },
                 ),
             ];
@@ -353,6 +354,7 @@ impl App {
                         }),
                         intent: Some("Prepare launch update".to_string()),
                         thought_signature: None,
+                        ..Default::default()
                     },
                 ),
             ];
