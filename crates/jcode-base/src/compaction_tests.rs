@@ -172,6 +172,43 @@ fn test_reactive_threshold_clamps_out_of_range_values() {
 }
 
 #[test]
+fn test_messages_for_api_folds_old_tool_results_but_not_history() {
+    let mut manager = CompactionManager::new();
+    manager.compaction_config.fold_tool_result_chars = 100;
+    let big = (0..40)
+        .map(|i| format!("row {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut messages = vec![Message::tool_result_with_duration("old", &big, false, None)];
+    for i in 0..RECENT_TURNS_TO_KEEP {
+        messages.push(make_text_message(Role::User, &format!("turn {i}")));
+    }
+    for _ in &messages {
+        manager.notify_message_added();
+    }
+
+    let view = manager.messages_for_api_with(&messages);
+    assert_eq!(view.len(), messages.len());
+    let folded = match &view[0].content[0] {
+        ContentBlock::ToolResult { content, .. } => content.clone(),
+        other => panic!("unexpected block {other:?}"),
+    };
+    assert!(folded.starts_with("[folded tool result: "), "{folded}");
+    assert!(folded.contains("row 0") && folded.contains("row 39"));
+    assert!(
+        matches!(&messages[0].content[0], ContentBlock::ToolResult { content, .. } if *content == big),
+        "stored history is never rewritten"
+    );
+
+    manager.compaction_config.fold_tool_result_chars = 0;
+    let view = manager.messages_for_api_with(&messages);
+    assert!(
+        matches!(&view[0].content[0], ContentBlock::ToolResult { content, .. } if *content == big),
+        "0 disables folding"
+    );
+}
+
+#[test]
 fn test_context_usage_prefers_observed_tokens() {
     let mut manager = CompactionManager::new().with_budget(1_000);
     let messages = vec![make_text_message(Role::User, "short message")];
@@ -261,6 +298,7 @@ async fn test_force_compact_applies_summary() {
 #[tokio::test]
 async fn test_guard_below_80_does_nothing() {
     let mut manager = CompactionManager::new().with_budget(10_000);
+    manager.compaction_config.reactive_threshold = COMPACTION_THRESHOLD;
     let mut messages = Vec::new();
     for i in 0..15 {
         messages.push(make_text_message(Role::User, &format!("msg {}", i)));
