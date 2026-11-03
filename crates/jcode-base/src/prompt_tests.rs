@@ -47,7 +47,10 @@ fn embedded_runtime_contract_is_frozen_into_the_binary() {
     // into OUT_DIR; include_str! makes it part of the binary, so deleting the
     // live symlink after the build cannot empty it.
     assert!(!EMBEDDED_RUNTIME_CONTRACT.trim().is_empty());
-    assert!(EMBEDDED_RUNTIME_CONTRACT.contains("Runtime contract"));
+    // Either the repo stub or an operator contract; both are markdown with a heading.
+    assert!(
+        EMBEDDED_RUNTIME_CONTRACT.contains("\n## ") || EMBEDDED_RUNTIME_CONTRACT.starts_with("# ")
+    );
 }
 
 #[cfg(unix)]
