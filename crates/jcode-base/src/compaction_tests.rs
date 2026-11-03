@@ -180,7 +180,7 @@ fn test_messages_for_api_folds_old_tool_results_but_not_history() {
         .collect::<Vec<_>>()
         .join("\n");
     let mut messages = vec![Message::tool_result_with_duration("old", &big, false, None)];
-    for i in 0..RECENT_TURNS_TO_KEEP {
+    for i in 0..=RECENT_TURNS_TO_KEEP {
         messages.push(make_text_message(Role::User, &format!("turn {i}")));
     }
     for _ in &messages {

@@ -632,7 +632,21 @@ pub fn fold_old_tool_results(
         })
         .collect();
 
-    let fold_end = messages.len() - keep_recent;
+    // Pin the boundary to the start of a user turn. A boundary that slides one
+    // message per call folds a result the provider cached verbatim on the
+    // previous call, invalidating the whole prefix after it every turn
+    // (measured: 70k cache_write per call). Turn starts move only when the
+    // user speaks, so between those points the folded view is byte-stable.
+    let fold_end = messages[..messages.len() - keep_recent]
+        .iter()
+        .rposition(|msg| {
+            msg.role == Role::User
+                && msg
+                    .content
+                    .iter()
+                    .all(|block| !matches!(block, ContentBlock::ToolResult { .. }))
+        })
+        .unwrap_or(0);
     let mut folded = 0;
     for msg in &mut messages[..fold_end] {
         for block in &mut msg.content {
@@ -856,6 +870,18 @@ mod tests {
         }
     }
 
+    fn user_turn(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }
+    }
+
     #[test]
     fn fold_rewrites_only_old_large_ok_tool_results() {
         let big = (0..50)
@@ -874,7 +900,8 @@ mod tests {
             timestamp: None,
             tool_duration_ms: None,
         }); // 4
-        msgs.extend(tool_pair("recent", "ls", &big, false)); // 5,6
+        msgs.push(user_turn("next")); // 5: fold boundary
+        msgs.extend(tool_pair("recent", "ls", &big, false)); // 6,7
 
         let folded = fold_old_tool_results(&mut msgs, 2, 100);
         assert_eq!(folded, 1);
@@ -890,7 +917,7 @@ mod tests {
             matches!(&msgs[4].content[0], ContentBlock::Text { text, .. } if *text == big),
             "assistant text is never folded"
         );
-        assert_eq!(result_text(&msgs[6]), big, "recent results stay verbatim");
+        assert_eq!(result_text(&msgs[7]), big, "recent results stay verbatim");
     }
 
     #[test]
@@ -901,6 +928,7 @@ mod tests {
             msgs.extend(tool_pair(file, &format!("cat .jcode/{file}"), &big, false));
         }
         msgs.extend(tool_pair("plain", "cat README.md", &big, false));
+        msgs.push(user_turn("next"));
         msgs.extend(tool_pair("tail", "pwd", "/", false));
 
         let folded = fold_old_tool_results(&mut msgs, 2, 100);
@@ -911,9 +939,51 @@ mod tests {
     }
 
     #[test]
+    fn fold_boundary_is_pinned_to_a_user_turn_while_the_tail_grows() {
+        let big = "y".repeat(5_000);
+        let mut msgs: Vec<Message> = tool_pair("a", "x", &big, false).into();
+        msgs.push(user_turn("turn 2")); // 2
+        msgs.extend(tool_pair("b", "x", &big, false)); // 3,4
+        msgs.push(user_turn("turn 3")); // 5: open turn
+        let keep = 3;
+        // The open turn keeps producing tool calls. A sliding window would
+        // fold one more result on every call; the pinned boundary moves once
+        // (when "turn 3" is `keep` messages back) and the open turn's own
+        // results never fold.
+        let mut b_flips = 0;
+        let mut b_folded = false;
+        for i in 0..6 {
+            msgs.extend(tool_pair(&format!("c{i}"), "x", &big, false));
+            let mut view = msgs.clone();
+            fold_old_tool_results(&mut view, keep, 100);
+            let now = result_text(&view[4]).starts_with("[folded tool result: ");
+            if now != b_folded {
+                b_flips += 1;
+                b_folded = now;
+            }
+            for j in 0..=i {
+                assert_eq!(
+                    result_text(&view[7 + 2 * j]),
+                    big,
+                    "c{j} verbatim on call {i}"
+                );
+            }
+        }
+        assert_eq!(
+            b_flips, 1,
+            "boundary moves once per turn, not once per call"
+        );
+        assert!(
+            b_folded,
+            "previous turn folds once the open turn is `keep` deep"
+        );
+    }
+
+    #[test]
     fn fold_is_deterministic_and_disabled_at_zero() {
         let big = "a\nerror: boom\nb\n".repeat(100);
         let mut a: Vec<Message> = tool_pair("t", "x", &big, false).into();
+        a.push(user_turn("next"));
         a.extend(tool_pair("tail", "pwd", "/", false));
         let mut b = a.clone();
         assert_eq!(fold_old_tool_results(&mut a, 2, 100), 1);
@@ -921,6 +991,7 @@ mod tests {
         assert_eq!(result_text(&a[1]), result_text(&b[1]));
         assert!(result_text(&a[1]).contains("error: boom"));
         let mut c: Vec<Message> = tool_pair("t", "x", &big, false).into();
+        c.push(user_turn("next"));
         c.extend(tool_pair("tail", "pwd", "/", false));
         assert_eq!(fold_old_tool_results(&mut c, 2, 0), 0);
         assert_eq!(result_text(&c[1]), big);
