@@ -1440,3 +1440,60 @@ fn concurrency_crash_lifecycle_does_not_emit_untrusted_legacy_counts() {
     assert!(crash.get("active_sessions_at_start").is_none());
     assert!(crash.get("multi_sessioned").is_none());
 }
+
+#[test]
+fn locked_state_update_loses_no_rows_under_parallel_writers() {
+    // Eight threads each append one distinct line to the same history file.
+    // Unlocked read-modify-write loses rows (two readers see the same base,
+    // the second write discards the first). Under the lock every line lands.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("telemetry_session_starts_x.txt");
+    let writers = 8;
+    let handles: Vec<_> = (0..writers)
+        .map(|i| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                update_state_file_locked(
+                    &path,
+                    |current| {
+                        let mut lines = current.unwrap_or_default();
+                        // Widen the race window on purpose.
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        if !lines.is_empty() {
+                            lines.push('\n');
+                        }
+                        lines.push_str(&i.to_string());
+                        (lines, true)
+                    },
+                    false,
+                )
+            })
+        })
+        .collect();
+    let applied = handles
+        .into_iter()
+        .map(|h| h.join().expect("writer thread"))
+        .filter(|ok| *ok)
+        .count();
+    assert_eq!(applied, writers, "every writer must publish under the lock");
+    let mut rows = parse_epoch_lines(&std::fs::read_to_string(&path).expect("state file"));
+    rows.sort_unstable();
+    assert_eq!(rows, (0..writers as i64).collect::<Vec<_>>());
+    assert!(
+        !path.with_extension("pending").exists(),
+        "atomic publish leaves no pending file"
+    );
+}
+
+#[test]
+fn locked_state_update_skips_instead_of_racing_when_lock_is_held() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("telemetry_active_days_x.txt");
+    std::fs::write(&path, "2026-01-01").unwrap();
+    let _held = super::concurrency::lock_path(&path.with_extension("lock")).expect("hold lock");
+    // lock_path waits 2 s then times out; the update must report `skipped`
+    // and leave the file untouched rather than write around the lock.
+    let result = update_state_file_locked(&path, |_| ("clobbered".to_string(), true), false);
+    assert!(!result);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "2026-01-01");
+}

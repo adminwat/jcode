@@ -885,37 +885,38 @@ fn update_active_days(id: &str) -> (u32, u32) {
         return (0, 0);
     };
     let today = Utc::now().date_naive();
-    let mut days = std::fs::read_to_string(&path)
-        .ok()
-        .into_iter()
-        .flat_map(|text| {
-            text.lines()
+    update_state_file_locked(
+        &path,
+        |current| {
+            let mut days = current
+                .as_deref()
+                .unwrap_or("")
+                .lines()
                 .map(str::trim)
-                .map(str::to_string)
+                .filter_map(|line| NaiveDate::parse_from_str(line, "%Y-%m-%d").ok())
+                .collect::<Vec<_>>();
+            days.push(today);
+            days.sort_unstable();
+            days.dedup();
+            let rendered = days
+                .iter()
+                .map(NaiveDate::to_string)
                 .collect::<Vec<_>>()
-        })
-        .filter_map(|line| NaiveDate::parse_from_str(&line, "%Y-%m-%d").ok())
-        .collect::<Vec<_>>();
-    days.push(today);
-    days.sort_unstable();
-    days.dedup();
-    let rendered = days
-        .iter()
-        .map(NaiveDate::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    write_private_file(&path, &rendered);
-    let days_7 = days
-        .iter()
-        .filter(|day| (today.signed_duration_since(**day).num_days()) < 7)
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let days_30 = days
-        .iter()
-        .filter(|day| (today.signed_duration_since(**day).num_days()) < 30)
-        .count()
-        .min(u32::MAX as usize) as u32;
-    (days_7, days_30)
+                .join("\n");
+            let days_7 = days
+                .iter()
+                .filter(|day| (today.signed_duration_since(**day).num_days()) < 7)
+                .count()
+                .min(u32::MAX as usize) as u32;
+            let days_30 = days
+                .iter()
+                .filter(|day| (today.signed_duration_since(**day).num_days()) < 30)
+                .count()
+                .min(u32::MAX as usize) as u32;
+            (rendered, (days_7, days_30))
+        },
+        (0, 0),
+    )
 }
 
 fn detect_project_profile() -> ProjectProfile {
