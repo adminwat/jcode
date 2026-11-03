@@ -480,7 +480,9 @@ fn login_no_browser_flag_parses() {
             no_validate,
             flow_id,
             cancel,
+            org_uuid,
         }) => {
+            assert!(org_uuid.is_none());
             assert!(provider.is_none());
             assert!(account.is_none());
             assert!(no_browser);
