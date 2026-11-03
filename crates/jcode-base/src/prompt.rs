@@ -6,6 +6,15 @@ use std::process::Command;
 /// Default system prompt for jcode (embedded at compile time)
 pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system_prompt.md");
 
+/// Runtime contract frozen into the binary at build time (see `build.rs`).
+/// Served when the global overlay file is missing or unreadable, so deleting
+/// or re-pointing `~/.jcode/prompt-overlay.md` cannot remove the contract.
+pub const EMBEDDED_RUNTIME_CONTRACT: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/runtime_contract.md"));
+
+const EMBEDDED_RUNTIME_CONTRACT_LABEL: &str =
+    "Global Prompt Overlay (embedded RUNTIME-CONTRACT.md: live file unavailable)";
+
 /// Load the base system prompt, allowing the user to fully replace the built-in
 /// [`DEFAULT_SYSTEM_PROMPT`]. Precedence: project `./.jcode/system-prompt.md`,
 /// then global `~/.jcode/system-prompt.md`, then the built-in default.
@@ -1023,13 +1032,25 @@ fn load_prompt_overlay_files_from_dirs(
 
     if !global_duplicates_project
         && let Some(global_overlay) = global_overlay
-        && let Some((content, size)) = load_file(
+    {
+        match load_file(
             global_overlay,
             "Global Prompt Overlay (~/.jcode/prompt-overlay.md)",
-        )
-    {
-        total_chars += size;
-        contents.push(content);
+        ) {
+            Some((content, size)) => {
+                total_chars += size;
+                contents.push(content);
+            }
+            None if !EMBEDDED_RUNTIME_CONTRACT.trim().is_empty() => {
+                total_chars += EMBEDDED_RUNTIME_CONTRACT.len();
+                contents.push(format!(
+                    "# {}\n\n{}",
+                    EMBEDDED_RUNTIME_CONTRACT_LABEL,
+                    EMBEDDED_RUNTIME_CONTRACT.trim()
+                ));
+            }
+            None => {}
+        }
     }
 
     if contents.is_empty() {

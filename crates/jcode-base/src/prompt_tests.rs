@@ -30,14 +30,42 @@ fn prompt_overlay_distinct_and_missing_files() {
         "global words".len()
     );
     std::fs::remove_file(&global).unwrap();
-    assert_eq!(
-        load_prompt_overlay_files_from_dirs(dir.path(), Some(&global)),
-        (None, 0)
-    );
-    assert_eq!(
-        load_prompt_overlay_files_from_dirs(dir.path(), Some(dir.path())),
-        (None, 0)
-    );
+    // The global overlay is gone: the embedded contract takes its place.
+    let (prompt, bytes) = load_prompt_overlay_files_from_dirs(dir.path(), Some(&global));
+    assert_eq!(bytes, EMBEDDED_RUNTIME_CONTRACT.len());
+    assert!(prompt.unwrap().contains(EMBEDDED_RUNTIME_CONTRACT_LABEL));
+    // No global path at all: nothing to substitute for.
+    assert_eq!(load_prompt_overlay_files_from_dirs(dir.path(), None), (None, 0));
+}
+
+#[test]
+fn embedded_runtime_contract_is_frozen_into_the_binary() {
+    // build.rs snapshots docs/RUNTIME-CONTRACT.md (or JCODE_RUNTIME_CONTRACT)
+    // into OUT_DIR; include_str! makes it part of the binary, so deleting the
+    // live symlink after the build cannot empty it.
+    assert!(!EMBEDDED_RUNTIME_CONTRACT.trim().is_empty());
+    assert!(EMBEDDED_RUNTIME_CONTRACT.contains("Runtime contract"));
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_global_overlay_symlink_serves_the_embedded_contract() {
+    // The production shape: ~/.jcode/prompt-overlay.md is a symlink into a
+    // config checkout. When that target is deleted the link dangles,
+    // `exists()` is false, and the embedded copy is served instead of nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("RUNTIME-CONTRACT.md");
+    std::fs::write(&target, "live contract").unwrap();
+    let link = dir.path().join("prompt-overlay.md");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let (prompt, _) = load_prompt_overlay_files_from_dirs(dir.path(), Some(&link));
+    assert!(prompt.unwrap().contains("live contract"), "live file wins while present");
+    std::fs::remove_file(&target).unwrap();
+    let (prompt, bytes) = load_prompt_overlay_files_from_dirs(dir.path(), Some(&link));
+    let prompt = prompt.unwrap();
+    assert!(prompt.contains(EMBEDDED_RUNTIME_CONTRACT_LABEL));
+    assert!(!prompt.contains("live contract"));
+    assert_eq!(bytes, EMBEDDED_RUNTIME_CONTRACT.len());
 }
 
 #[cfg(unix)]
