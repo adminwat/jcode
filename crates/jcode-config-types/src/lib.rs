@@ -355,6 +355,17 @@ pub struct CompactionConfig {
     /// Compaction mode: reactive (default), proactive, or semantic
     pub mode: CompactionMode,
 
+    /// [reactive] Context fill level (0.0-1.0) at which background summary
+    /// compaction starts. Lower it to keep per-request cache reads small on
+    /// large-window models; the system prompt and overlays are never in range.
+    pub reactive_threshold: f32,
+
+    /// Fold tool results older than the last `RECENT_TURNS_TO_KEEP` messages
+    /// into one-line snapshots in the request view when they exceed this many
+    /// chars. 0 disables. Stored history is never rewritten; the system prompt
+    /// and overlays are outside the fold by type.
+    pub fold_tool_result_chars: usize,
+
     /// [proactive] Number of turns to look ahead when projecting token growth
     pub lookahead_turns: usize,
 
@@ -387,6 +398,8 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             mode: CompactionMode::Reactive,
+            reactive_threshold: 0.80,
+            fold_tool_result_chars: 600,
             lookahead_turns: 15,
             ewma_alpha: 0.3,
             proactive_floor: 0.40,

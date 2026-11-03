@@ -35,9 +35,9 @@ pub use jcode_compaction_core::{
     TOKEN_HISTORY_WINDOW, build_compaction_prompt, build_emergency_summary_text,
     compacted_summary_text_block, content_char_count, effective_context_tokens_from_usage,
     emergency_strip_large_images, emergency_truncate_large_payloads, estimate_compaction_tokens,
-    is_request_payload_too_large_error, mean_embedding, message_char_count, safe_compaction_cutoff,
-    semantic_cache_key, semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
-    summary_payload_char_count,
+    fold_old_tool_results, is_request_payload_too_large_error, mean_embedding, message_char_count,
+    safe_compaction_cutoff, semantic_cache_key, semantic_goal_text, semantic_message_text,
+    strip_large_images_in_contents, summary_payload_char_count,
 };
 
 const HARD_THRESHOLD_PENDING_WAIT_MS: u64 = 15_000;
@@ -834,6 +834,17 @@ impl CompactionManager {
         self.effective_token_count() as f32 / self.token_budget as f32
     }
 
+    /// Reactive trigger level from `[compaction] reactive_threshold`, clamped
+    /// so a bad value can neither compact every turn nor never compact.
+    pub fn reactive_threshold(&self) -> f32 {
+        let configured = self.compaction_config.reactive_threshold;
+        if configured.is_finite() {
+            configured.clamp(MANUAL_COMPACT_MIN_THRESHOLD, COMPACTION_THRESHOLD)
+        } else {
+            COMPACTION_THRESHOLD
+        }
+    }
+
     /// Check if we should start compaction
     pub fn should_compact_with(&self, all_messages: &[Message]) -> bool {
         use crate::config::CompactionMode;
@@ -844,7 +855,7 @@ impl CompactionManager {
         match self.mode {
             CompactionMode::Reactive => {
                 self.pending_task.is_none()
-                    && self.context_usage_with(all_messages) >= COMPACTION_THRESHOLD
+                    && self.context_usage_with(all_messages) >= self.reactive_threshold()
                     && active.len() > RECENT_TURNS_TO_KEEP
             }
             CompactionMode::Proactive => {
@@ -1296,7 +1307,7 @@ impl CompactionManager {
 
         let active = self.active_messages(all_messages);
 
-        match &self.active_summary {
+        let mut result = match &self.active_summary {
             Some(summary) => {
                 let summary_block = summary
                     .openai_encrypted_content
@@ -1324,7 +1335,19 @@ impl CompactionManager {
                 result
             }
             None => active.to_vec(),
+        };
+        let folded = fold_old_tool_results(
+            &mut result,
+            RECENT_TURNS_TO_KEEP,
+            self.compaction_config.fold_tool_result_chars,
+        );
+        if folded > 0 {
+            crate::logging::info(&format!(
+                "[compaction] folded {} old tool results in request view (>{} chars)",
+                folded, self.compaction_config.fold_tool_result_chars
+            ));
         }
+        result
     }
 
     /// Check if compaction is in progress
