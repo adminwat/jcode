@@ -420,21 +420,20 @@ fn tool_use_step(block: &ContentBlock) -> Option<String> {
         return None;
     };
     let obj = input.as_object();
-    match name.as_str() {
-        "agentgrep" | "grep" | "glob" | "ls" | "codesearch" | "session_search" => {
-            Some("Searched code and session context".to_string())
-        }
-        "read" => Some(
+    use crate::tool::ToolFamily;
+    match ToolFamily::of(name) {
+        ToolFamily::Search => Some("Searched code and session context".to_string()),
+        ToolFamily::Read => Some(
             obj.and_then(|map| map.get("file_path").and_then(|v| v.as_str()))
                 .map(|path| format!("Inspected `{}`", path.trim()))
                 .unwrap_or_else(|| "Inspected files".to_string()),
         ),
-        "edit" | "multiedit" | "write" | "patch" | "apply_patch" => Some(
+        ToolFamily::Edit => Some(
             obj.and_then(|map| map.get("file_path").and_then(|v| v.as_str()))
                 .map(|path| format!("Updated `{}`", path.trim()))
                 .unwrap_or_else(|| "Edited files".to_string()),
         ),
-        "bash" => {
+        ToolFamily::Execute if name == "bash" => {
             let command = obj
                 .and_then(|map| map.get("command").and_then(|v| v.as_str()))
                 .unwrap_or_default()
@@ -463,11 +462,11 @@ fn tool_use_step(block: &ContentBlock) -> Option<String> {
                 ))
             }
         }
-        "communicate" => Some("Coordinated with other agents".to_string()),
-        "subagent" => Some("Spawned a subagent".to_string()),
-        "memory" => Some("Queried memory context".to_string()),
-        "side_panel" | "todo" | "todoread" | "todowrite" | "initiative" => None,
-        other => Some(format!("Used `{}`", other)),
+        ToolFamily::Coordinate if name == "subagent" => Some("Spawned a subagent".to_string()),
+        ToolFamily::Coordinate => Some("Coordinated with other agents".to_string()),
+        ToolFamily::Memory => Some("Queried memory context".to_string()),
+        ToolFamily::Bookkeeping => None,
+        _ => Some(format!("Used `{}`", name)),
     }
 }
 

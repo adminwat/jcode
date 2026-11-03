@@ -1843,13 +1843,16 @@ fn tool_title(name: &str) -> String {
     }
 }
 
+/// ACP `kind` is the five labels the protocol defines; every other family is
+/// `other` on the wire. The classification itself lives in `ToolFamily::of`.
 pub(crate) fn tool_kind(name: &str) -> &'static str {
-    match name {
-        "read" => "read",
-        "write" | "edit" | "multiedit" | "patch" | "apply_patch" => "edit",
-        "bash" | "bg" | "selfdev" => "execute",
-        "agentgrep" | "grep" | "glob" | "ls" | "session_search" | "conversation_search" => "search",
-        "webfetch" | "websearch" | "codesearch" => "fetch",
+    use crate::tool::ToolFamily;
+    match ToolFamily::of(name) {
+        f @ (ToolFamily::Read
+        | ToolFamily::Edit
+        | ToolFamily::Execute
+        | ToolFamily::Search
+        | ToolFamily::Fetch) => f.as_str(),
         _ => "other",
     }
 }
