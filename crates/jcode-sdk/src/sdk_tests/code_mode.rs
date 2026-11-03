@@ -54,7 +54,8 @@ impl Read for Replies {
             };
             if let Some(nl) = pending.iter().position(|b| *b == b'\n') {
                 self.consumed += nl + 1;
-                let frame: ClientFrame = serde_json::from_slice(&pending[..nl]).expect("client frame");
+                let frame: ClientFrame =
+                    serde_json::from_slice(&pending[..nl]).expect("client frame");
                 let reply = self.reply(&frame);
                 self.buffer = serde_json::to_vec(&reply).unwrap();
                 self.buffer.push(b'\n');
@@ -86,7 +87,9 @@ impl Replies {
 }
 
 impl Transport for Scripted {
-    fn split(self: Box<Self>) -> crate::errors::Result<(Box<dyn BufRead + Send>, Box<dyn Write + Send>)> {
+    fn split(
+        self: Box<Self>,
+    ) -> crate::errors::Result<(Box<dyn BufRead + Send>, Box<dyn Write + Send>)> {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let reader = Replies {
             requests: Arc::clone(&requests),
@@ -122,7 +125,10 @@ fn verified_session_requires_every_capability_a_live_contract_and_an_owned_sessi
     assert_eq!(verified.proof().contract_bytes(), CONTRACT.len());
     assert_eq!(
         verified.proof().capabilities(),
-        REQUIRED_CAPABILITIES.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        REQUIRED_CAPABILITIES
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
     );
 }
 

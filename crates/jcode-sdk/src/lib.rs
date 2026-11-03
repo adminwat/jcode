@@ -55,12 +55,12 @@ pub use auth::{
     AuthClient, AuthFlow, AuthInputKind, AuthOptions, AuthPrompt, AuthResult, LoginMethod,
     LoginProvider,
 };
-pub use code_mode::{InfrastructureProof, SandboxSession, VerifiedCodeModeSession};
 pub use client::{
     ConnectOptions, EventStream, FileContent, FileStatus, GlobalEventStream, GlobalEventsOptions,
     JcodeClient, RunOptions, RuntimeInfo, SearchTextOptions, ToolCall, Transport, TurnResult,
     UnixTransport, Usage,
 };
+pub use code_mode::{InfrastructureProof, SandboxSession, VerifiedCodeModeSession};
 pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_duration};
 pub use errors::{Error, ErrorKind, Result};
 pub use jcode_harness_api::{
@@ -79,8 +79,9 @@ pub use structured::{
 
 /// The protocol types, re-exported so a client needs one dependency, not two.
 pub use jcode_harness_api as api;
-pub use jcode_harness_api::{ModelUsage, compare_model_usage};
 pub use jcode_harness_api::{
     ApiEvent, ApiRequest, HistoryMessage, ModelRouteInfo, PermissionDecision, RenderedImage,
-    RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo, TextMatch, api_socket_path,
+    RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo, TextMatch,
+    api_socket_path,
 };
+pub use jcode_harness_api::{ModelUsage, compare_model_usage};

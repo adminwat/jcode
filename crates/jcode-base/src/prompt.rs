@@ -1030,9 +1030,7 @@ fn load_prompt_overlay_files_from_dirs(
         }
     });
 
-    if !global_duplicates_project
-        && let Some(global_overlay) = global_overlay
-    {
+    if !global_duplicates_project && let Some(global_overlay) = global_overlay {
         match load_file(
             global_overlay,
             "Global Prompt Overlay (~/.jcode/prompt-overlay.md)",

@@ -35,7 +35,10 @@ fn prompt_overlay_distinct_and_missing_files() {
     assert_eq!(bytes, EMBEDDED_RUNTIME_CONTRACT.len());
     assert!(prompt.unwrap().contains(EMBEDDED_RUNTIME_CONTRACT_LABEL));
     // No global path at all: nothing to substitute for.
-    assert_eq!(load_prompt_overlay_files_from_dirs(dir.path(), None), (None, 0));
+    assert_eq!(
+        load_prompt_overlay_files_from_dirs(dir.path(), None),
+        (None, 0)
+    );
 }
 
 #[test]
@@ -59,7 +62,10 @@ fn dangling_global_overlay_symlink_serves_the_embedded_contract() {
     let link = dir.path().join("prompt-overlay.md");
     std::os::unix::fs::symlink(&target, &link).unwrap();
     let (prompt, _) = load_prompt_overlay_files_from_dirs(dir.path(), Some(&link));
-    assert!(prompt.unwrap().contains("live contract"), "live file wins while present");
+    assert!(
+        prompt.unwrap().contains("live contract"),
+        "live file wins while present"
+    );
     std::fs::remove_file(&target).unwrap();
     let (prompt, bytes) = load_prompt_overlay_files_from_dirs(dir.path(), Some(&link));
     let prompt = prompt.unwrap();
