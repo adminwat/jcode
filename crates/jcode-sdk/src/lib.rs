@@ -36,6 +36,7 @@
 
 mod auth;
 mod client;
+pub mod code_mode;
 mod diagnostics;
 mod errors;
 mod launch;
@@ -46,10 +47,15 @@ mod structured;
 #[path = "sdk_tests/parity.rs"]
 mod parity_tests;
 
+#[cfg(test)]
+#[path = "sdk_tests/code_mode.rs"]
+mod code_mode_tests;
+
 pub use auth::{
     AuthClient, AuthFlow, AuthInputKind, AuthOptions, AuthPrompt, AuthResult, LoginMethod,
     LoginProvider,
 };
+pub use code_mode::{InfrastructureProof, SandboxSession, VerifiedCodeModeSession};
 pub use client::{
     ConnectOptions, EventStream, FileContent, FileStatus, GlobalEventStream, GlobalEventsOptions,
     JcodeClient, RunOptions, RuntimeInfo, SearchTextOptions, ToolCall, Transport, TurnResult,
