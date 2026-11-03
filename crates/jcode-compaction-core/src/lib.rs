@@ -593,6 +593,110 @@ pub fn emergency_truncate_large_payloads(
     truncated
 }
 
+/// Files whose tool results are never folded, matched on any string in the
+/// originating `ToolUse` input. These files already reach the model through
+/// the system prompt every request; this keeps an explicit read of them
+/// verbatim in history as well.
+pub const FOLD_PROTECTED_FILES: [&str; 2] = ["prompt-overlay.md", "RUNTIME-CONTRACT.md"];
+
+/// Max chars kept from the head, signal and tail lines of a folded result.
+const FOLD_LINE_CHARS: usize = 120;
+
+/// Fold tool results older than the last `keep_recent` messages into one-line
+/// snapshots in the request view. Only `ToolResult` text is rewritten: user and
+/// assistant text, tool calls, reasoning, images and the system prompt (which
+/// carries the prompt overlays) are outside this function's reach by type.
+/// Error results and results of calls naming a `FOLD_PROTECTED_FILES` entry
+/// stay verbatim. Deterministic, so a folded prefix is byte-stable across
+/// turns and stays cache-warm. Returns the number of folded blocks.
+pub fn fold_old_tool_results(
+    messages: &mut [Message],
+    keep_recent: usize,
+    max_chars: usize,
+) -> usize {
+    if max_chars == 0 || messages.len() <= keep_recent {
+        return 0;
+    }
+    let protected: HashSet<String> = messages
+        .iter()
+        .flat_map(|msg| msg.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, input, .. }
+                if FOLD_PROTECTED_FILES
+                    .iter()
+                    .any(|file| input.to_string().contains(file)) =>
+            {
+                Some(id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    let fold_end = messages.len() - keep_recent;
+    let mut folded = 0;
+    for msg in &mut messages[..fold_end] {
+        for block in &mut msg.content {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = block
+                && !matches!(is_error, Some(true))
+                && content.len() > max_chars
+                && !protected.contains(tool_use_id)
+            {
+                *content = fold_tool_result(content);
+                folded += 1;
+            }
+        }
+    }
+    folded
+}
+
+/// One-line snapshot: size, first line, first error/exit/failure line, last line.
+fn fold_tool_result(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    let clip = |line: &str| -> String {
+        let line = line.trim();
+        if line.chars().count() > FOLD_LINE_CHARS {
+            format!(
+                "{}…",
+                line.chars().take(FOLD_LINE_CHARS).collect::<String>()
+            )
+        } else {
+            line.to_string()
+        }
+    };
+    let head = lines.first().map(|l| clip(l)).unwrap_or_default();
+    let tail = lines.last().filter(|_| lines.len() > 1).map(|l| clip(l));
+    let signal = lines
+        .iter()
+        .find(|l| {
+            let low = l.to_ascii_lowercase();
+            low.contains("exit code")
+                || low.contains("error")
+                || low.contains("panicked")
+                || low.contains("failed")
+        })
+        .map(|l| clip(l))
+        .filter(|s| *s != head && tail.as_ref() != Some(s));
+    let mut out = format!(
+        "[folded tool result: {} chars, {} lines] {}",
+        content.len(),
+        lines.len(),
+        head
+    );
+    if let Some(signal) = signal {
+        out.push_str(" | ");
+        out.push_str(&signal);
+    }
+    if let Some(tail) = tail {
+        out.push_str(" … ");
+        out.push_str(&tail);
+    }
+    out
+}
+
 /// Whether a provider error indicates the *serialized request body* was too
 /// large (HTTP 413), as distinct from exceeding the model's token context
 /// window. Anthropic surfaces this as `request_too_large` / "Request exceeds the
@@ -718,6 +822,109 @@ pub fn tail_str_boundary(value: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool_pair(id: &str, input: &str, result: &str, is_error: bool) -> [Message; 2] {
+        [
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: id.to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({ "command": input }),
+                    thought_signature: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: id.to_string(),
+                    content: result.to_string(),
+                    is_error: if is_error { Some(true) } else { None },
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ]
+    }
+
+    fn result_text(msg: &Message) -> &str {
+        match &msg.content[0] {
+            ContentBlock::ToolResult { content, .. } => content,
+            _ => panic!("not a tool result"),
+        }
+    }
+
+    #[test]
+    fn fold_rewrites_only_old_large_ok_tool_results() {
+        let big = (0..50)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut msgs: Vec<Message> = Vec::new();
+        msgs.extend(tool_pair("old", "cargo build", &big, false)); // 0,1
+        msgs.extend(tool_pair("err", "cargo test", &big, true)); // 2,3
+        msgs.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: big.clone(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }); // 4
+        msgs.extend(tool_pair("recent", "ls", &big, false)); // 5,6
+
+        let folded = fold_old_tool_results(&mut msgs, 2, 100);
+        assert_eq!(folded, 1);
+        let snap = result_text(&msgs[1]);
+        assert!(snap.starts_with("[folded tool result: "), "{snap}");
+        assert!(
+            snap.contains("line 0") && snap.contains("line 49"),
+            "{snap}"
+        );
+        assert!(snap.len() < 200);
+        assert_eq!(result_text(&msgs[3]), big, "error results stay verbatim");
+        assert!(
+            matches!(&msgs[4].content[0], ContentBlock::Text { text, .. } if *text == big),
+            "assistant text is never folded"
+        );
+        assert_eq!(result_text(&msgs[6]), big, "recent results stay verbatim");
+    }
+
+    #[test]
+    fn fold_keeps_protected_overlay_files_verbatim() {
+        let big = "x".repeat(5_000);
+        let mut msgs: Vec<Message> = Vec::new();
+        for file in FOLD_PROTECTED_FILES {
+            msgs.extend(tool_pair(file, &format!("cat .jcode/{file}"), &big, false));
+        }
+        msgs.extend(tool_pair("plain", "cat README.md", &big, false));
+        msgs.extend(tool_pair("tail", "pwd", "/", false));
+
+        let folded = fold_old_tool_results(&mut msgs, 2, 100);
+        assert_eq!(folded, 1, "only the unprotected read folds");
+        assert_eq!(result_text(&msgs[1]), big);
+        assert_eq!(result_text(&msgs[3]), big);
+        assert!(result_text(&msgs[5]).starts_with("[folded tool result: "));
+    }
+
+    #[test]
+    fn fold_is_deterministic_and_disabled_at_zero() {
+        let big = "a\nerror: boom\nb\n".repeat(100);
+        let mut a: Vec<Message> = tool_pair("t", "x", &big, false).into();
+        a.extend(tool_pair("tail", "pwd", "/", false));
+        let mut b = a.clone();
+        assert_eq!(fold_old_tool_results(&mut a, 2, 100), 1);
+        assert_eq!(fold_old_tool_results(&mut b, 2, 100), 1);
+        assert_eq!(result_text(&a[1]), result_text(&b[1]));
+        assert!(result_text(&a[1]).contains("error: boom"));
+        let mut c: Vec<Message> = tool_pair("t", "x", &big, false).into();
+        c.extend(tool_pair("tail", "pwd", "/", false));
+        assert_eq!(fold_old_tool_results(&mut c, 2, 0), 0);
+        assert_eq!(result_text(&c[1]), big);
+    }
 
     #[test]
     fn effective_context_split_accounting_adds_cache_counters() {

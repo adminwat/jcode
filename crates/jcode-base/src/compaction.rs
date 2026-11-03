@@ -35,9 +35,9 @@ pub use jcode_compaction_core::{
     TOKEN_HISTORY_WINDOW, build_compaction_prompt, build_emergency_summary_text,
     compacted_summary_text_block, content_char_count, effective_context_tokens_from_usage,
     emergency_strip_large_images, emergency_truncate_large_payloads, estimate_compaction_tokens,
-    is_request_payload_too_large_error, mean_embedding, message_char_count, safe_compaction_cutoff,
-    semantic_cache_key, semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
-    summary_payload_char_count,
+    fold_old_tool_results, is_request_payload_too_large_error, mean_embedding, message_char_count,
+    safe_compaction_cutoff, semantic_cache_key, semantic_goal_text, semantic_message_text,
+    strip_large_images_in_contents, summary_payload_char_count,
 };
 
 const HARD_THRESHOLD_PENDING_WAIT_MS: u64 = 15_000;
@@ -1317,7 +1317,7 @@ impl CompactionManager {
 
         let active = self.active_messages(all_messages);
 
-        match &self.active_summary {
+        let mut result = match &self.active_summary {
             Some(summary) => {
                 let summary_block = summary
                     .openai_encrypted_content
@@ -1345,7 +1345,19 @@ impl CompactionManager {
                 result
             }
             None => active.to_vec(),
+        };
+        let folded = fold_old_tool_results(
+            &mut result,
+            RECENT_TURNS_TO_KEEP,
+            self.compaction_config.fold_tool_result_chars,
+        );
+        if folded > 0 {
+            crate::logging::info(&format!(
+                "[compaction] folded {} old tool results in request view (>{} chars)",
+                folded, self.compaction_config.fold_tool_result_chars
+            ));
         }
+        result
     }
 
     /// Check if compaction is in progress
