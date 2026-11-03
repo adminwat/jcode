@@ -834,6 +834,17 @@ impl CompactionManager {
         self.effective_token_count() as f32 / self.token_budget as f32
     }
 
+    /// Reactive trigger level from `[compaction] reactive_threshold`, clamped
+    /// so a bad value can neither compact every turn nor never compact.
+    pub fn reactive_threshold(&self) -> f32 {
+        let configured = self.compaction_config.reactive_threshold;
+        if configured.is_finite() {
+            configured.clamp(MANUAL_COMPACT_MIN_THRESHOLD, COMPACTION_THRESHOLD)
+        } else {
+            COMPACTION_THRESHOLD
+        }
+    }
+
     /// Check if we should start compaction
     pub fn should_compact_with(&self, all_messages: &[Message]) -> bool {
         use crate::config::CompactionMode;
@@ -844,7 +855,7 @@ impl CompactionManager {
         match self.mode {
             CompactionMode::Reactive => {
                 self.pending_task.is_none()
-                    && self.context_usage_with(all_messages) >= COMPACTION_THRESHOLD
+                    && self.context_usage_with(all_messages) >= self.reactive_threshold()
                     && active.len() > RECENT_TURNS_TO_KEEP
             }
             CompactionMode::Proactive => {

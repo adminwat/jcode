@@ -355,6 +355,11 @@ pub struct CompactionConfig {
     /// Compaction mode: reactive (default), proactive, or semantic
     pub mode: CompactionMode,
 
+    /// [reactive] Context fill level (0.0-1.0) at which background summary
+    /// compaction starts. Lower it to keep per-request cache reads small on
+    /// large-window models; the system prompt and overlays are never in range.
+    pub reactive_threshold: f32,
+
     /// [proactive] Number of turns to look ahead when projecting token growth
     pub lookahead_turns: usize,
 
@@ -387,6 +392,7 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             mode: CompactionMode::Reactive,
+            reactive_threshold: 0.80,
             lookahead_turns: 15,
             ewma_alpha: 0.3,
             proactive_floor: 0.40,
