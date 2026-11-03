@@ -116,6 +116,63 @@ pub enum ToolExecutionMode {
     Direct,
 }
 
+/// The canonical family a tool belongs to. One compiled table, consulted by
+/// every surface that used to keep its own `match name { "read" | ... }`
+/// (ACP tool kinds, catch-up summaries). A tool overrides `Tool::family`
+/// when its name is not in the table; the table is the fallback so MCP and
+/// dynamically registered tools still classify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolFamily {
+    Read,
+    Edit,
+    Execute,
+    Search,
+    Fetch,
+    Coordinate,
+    Memory,
+    Bookkeeping,
+    Other,
+}
+
+impl ToolFamily {
+    /// Classify by registered tool name. The single source of truth for
+    /// name-based classification; add a name here, never in a caller.
+    pub fn of(name: &str) -> Self {
+        match name {
+            "read" => Self::Read,
+            "write" | "edit" | "multiedit" | "patch" | "apply_patch" => Self::Edit,
+            "bash" | "bg" | "selfdev" => Self::Execute,
+            "agentgrep" | "grep" | "glob" | "ls" | "session_search" | "conversation_search" => {
+                Self::Search
+            }
+            "webfetch" | "websearch" | "codesearch" => Self::Fetch,
+            "communicate" | "subagent" | "swarm" => Self::Coordinate,
+            "memory" => Self::Memory,
+            "side_panel" | "todo" | "todoread" | "todowrite" | "initiative" => Self::Bookkeeping,
+            _ => Self::Other,
+        }
+    }
+
+    /// Stable wire label (ACP `kind`, telemetry).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Edit => "edit",
+            Self::Execute => "execute",
+            Self::Search => "search",
+            Self::Fetch => "fetch",
+            Self::Coordinate => "coordinate",
+            Self::Memory => "memory",
+            Self::Bookkeeping => "bookkeeping",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn is_mutating(self) -> bool {
+        matches!(self, Self::Edit | Self::Execute)
+    }
+}
+
 impl ToolContext {
     pub fn for_subcall(&self, tool_call_id: String) -> Self {
         Self {
@@ -154,6 +211,12 @@ pub trait Tool: Send + Sync {
 
     /// Execute the tool with the given input.
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput>;
+
+    /// Canonical family. Defaults to the name table; override for a tool
+    /// whose name the table does not know.
+    fn family(&self) -> ToolFamily {
+        ToolFamily::of(self.name())
+    }
 
     /// Convert to API tool definition.
     fn to_definition(&self) -> ToolDefinition {
@@ -282,5 +345,42 @@ mod escape_hatch_tests {
         // ever diverge, the flag would be advertised but never honored, which is
         // worse than not offering it at all.
         assert_eq!(ACCEPT_LARGE_OUTPUT_KEY, "accept_large_output");
+    }
+
+    #[test]
+    fn family_table_classifies_every_known_name_and_falls_back() {
+        assert_eq!(ToolFamily::of("read"), ToolFamily::Read);
+        assert_eq!(ToolFamily::of("apply_patch"), ToolFamily::Edit);
+        assert_eq!(ToolFamily::of("bash"), ToolFamily::Execute);
+        assert_eq!(ToolFamily::of("conversation_search"), ToolFamily::Search);
+        assert_eq!(ToolFamily::of("codesearch"), ToolFamily::Fetch);
+        assert_eq!(ToolFamily::of("swarm"), ToolFamily::Coordinate);
+        assert_eq!(ToolFamily::of("memory"), ToolFamily::Memory);
+        assert_eq!(ToolFamily::of("todo"), ToolFamily::Bookkeeping);
+        assert_eq!(ToolFamily::of("mcp_call"), ToolFamily::Other);
+        assert!(ToolFamily::Edit.is_mutating());
+        assert!(!ToolFamily::Read.is_mutating());
+    }
+
+    #[test]
+    fn trait_default_family_uses_the_table() {
+        struct Named(&'static str);
+        #[async_trait]
+        impl Tool for Named {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn description(&self) -> &str {
+                ""
+            }
+            fn parameters_schema(&self) -> Value {
+                Value::Null
+            }
+            async fn execute(&self, _: Value, _: ToolContext) -> Result<ToolOutput> {
+                unreachable!()
+            }
+        }
+        assert_eq!(Named("edit").family(), ToolFamily::Edit);
+        assert_eq!(Named("unknown_tool").family(), ToolFamily::Other);
     }
 }

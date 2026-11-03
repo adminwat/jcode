@@ -97,23 +97,38 @@ pub(super) fn utc_weekday(timestamp: DateTime<Utc>) -> u32 {
     timestamp.weekday().num_days_from_monday()
 }
 
-pub(super) fn write_private_dir_file(path: &PathBuf, value: &str) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+/// Serialize a read-modify-write of one telemetry state file across every
+/// jcode process sharing this JCODE_HOME. Without it two sessions starting in
+/// the same second each read the file, each append their own line, and the
+/// second `fs::write` discards the first. The lock is a sibling `<name>.lock`
+/// held by an OS advisory lease, so a crash releases it; the write publishes
+/// by rename so a reader never sees a torn file. On a lock timeout the update
+/// is skipped rather than raced: telemetry degrades, it never corrupts.
+pub(super) fn update_state_file_locked<T>(
+    path: &PathBuf,
+    update: impl FnOnce(Option<String>) -> (String, T),
+    skipped: T,
+) -> T {
+    let Some(parent) = path.parent() else {
+        return skipped;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return skipped;
     }
-    write_private_file(path, value);
+    let Ok(_lock) = super::concurrency::lock_path(&path.with_extension("lock")) else {
+        return skipped;
+    };
+    let current = std::fs::read_to_string(path).ok();
+    let (rendered, result) = update(current);
+    match super::concurrency::atomic_private_write(path, rendered.as_bytes()) {
+        Ok(()) => result,
+        Err(_) => skipped,
+    }
 }
 
-pub(super) fn read_epoch_lines(path: &PathBuf) -> Vec<i64> {
-    std::fs::read_to_string(path)
-        .ok()
-        .into_iter()
-        .flat_map(|text| {
-            text.lines()
-                .map(str::trim)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
+pub(super) fn parse_epoch_lines(text: &str) -> Vec<i64> {
+    text.lines()
+        .map(str::trim)
         .filter_map(|line| line.parse::<i64>().ok())
         .collect()
 }
@@ -127,36 +142,44 @@ pub(super) fn update_session_start_history(
     };
     let now = started_at_utc.timestamp();
     let cutoff_30d = now - 30 * 24 * 60 * 60;
-    let mut starts = read_epoch_lines(&path)
-        .into_iter()
-        .filter(|value| *value >= cutoff_30d)
-        .collect::<Vec<_>>();
-    starts.sort_unstable();
-    let previous = starts.last().copied();
-    starts.push(now);
-    let rendered = starts
-        .iter()
-        .map(i64::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    write_private_dir_file(&path, &rendered);
-    let sessions_started_24h = starts
-        .iter()
-        .filter(|value| now.saturating_sub(**value) < 24 * 60 * 60)
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let sessions_started_7d = starts
-        .iter()
-        .filter(|value| now.saturating_sub(**value) < 7 * 24 * 60 * 60)
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let previous_session_gap_secs = previous
-        .and_then(|value| now.checked_sub(value))
-        .map(|value| value.min(u64::MAX as i64) as u64);
-    (
-        previous_session_gap_secs,
-        sessions_started_24h,
-        sessions_started_7d,
+    update_state_file_locked(
+        &path,
+        |current| {
+            let mut starts = parse_epoch_lines(current.as_deref().unwrap_or(""))
+                .into_iter()
+                .filter(|value| *value >= cutoff_30d)
+                .collect::<Vec<_>>();
+            starts.sort_unstable();
+            let previous = starts.last().copied();
+            starts.push(now);
+            let rendered = starts
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let sessions_started_24h = starts
+                .iter()
+                .filter(|value| now.saturating_sub(**value) < 24 * 60 * 60)
+                .count()
+                .min(u32::MAX as usize) as u32;
+            let sessions_started_7d = starts
+                .iter()
+                .filter(|value| now.saturating_sub(**value) < 7 * 24 * 60 * 60)
+                .count()
+                .min(u32::MAX as usize) as u32;
+            let previous_session_gap_secs = previous
+                .and_then(|value| now.checked_sub(value))
+                .map(|value| value.min(u64::MAX as i64) as u64);
+            (
+                rendered,
+                (
+                    previous_session_gap_secs,
+                    sessions_started_24h,
+                    sessions_started_7d,
+                ),
+            )
+        },
+        (None, 0, 0),
     )
 }
 

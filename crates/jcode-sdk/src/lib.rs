@@ -36,6 +36,7 @@
 
 mod auth;
 mod client;
+pub mod code_mode;
 mod diagnostics;
 mod errors;
 mod launch;
@@ -46,6 +47,10 @@ mod structured;
 #[path = "sdk_tests/parity.rs"]
 mod parity_tests;
 
+#[cfg(test)]
+#[path = "sdk_tests/code_mode.rs"]
+mod code_mode_tests;
+
 pub use auth::{
     AuthClient, AuthFlow, AuthInputKind, AuthOptions, AuthPrompt, AuthResult, LoginMethod,
     LoginProvider,
@@ -55,6 +60,7 @@ pub use client::{
     JcodeClient, RunOptions, RuntimeInfo, SearchTextOptions, ToolCall, Transport, TurnResult,
     UnixTransport, Usage,
 };
+pub use code_mode::{InfrastructureProof, SandboxSession, VerifiedCodeModeSession};
 pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_duration};
 pub use errors::{Error, ErrorKind, Result};
 pub use jcode_harness_api::{
@@ -73,8 +79,9 @@ pub use structured::{
 
 /// The protocol types, re-exported so a client needs one dependency, not two.
 pub use jcode_harness_api as api;
-pub use jcode_harness_api::{ModelUsage, compare_model_usage};
 pub use jcode_harness_api::{
     ApiEvent, ApiRequest, HistoryMessage, ModelRouteInfo, PermissionDecision, RenderedImage,
-    RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo, TextMatch, api_socket_path,
+    RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo, TextMatch,
+    api_socket_path,
 };
+pub use jcode_harness_api::{ModelUsage, compare_model_usage};
