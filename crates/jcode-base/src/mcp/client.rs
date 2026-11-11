@@ -102,6 +102,14 @@ impl McpHandle {
         &self.name
     }
 
+    /// True once the writer task has exited, which happens when the child's stdin
+    /// broke (process died or was reaped). Every request on a closed handle fails
+    /// at `writer_tx.send` with "Failed to send request: channel closed" and no
+    /// amount of waiting helps; the holder has to drop it and reconnect.
+    pub fn is_closed(&self) -> bool {
+        self.writer_tx.is_closed()
+    }
+
     /// Get server info
     pub fn server_info(&self) -> Option<ServerInfo> {
         self.server_info
@@ -216,10 +224,22 @@ impl McpClient {
             Arc::new(Mutex::new(HashMap::new()));
         let (writer_tx, mut writer_rx) = mpsc::channel::<String>(32);
 
-        // Spawn writer task
+        // Spawn writer task. It exits (closing `writer_tx`, so `is_closed()`
+        // turns true) when a write fails OR when the reader task signals EOF:
+        // a child that dies without a pending write would otherwise keep the
+        // channel open and the first call after death would still fail.
+        // The sender is owned by the reader task; dropping it on exit is the signal.
+        let (reader_eof_tx, mut reader_eof_rx) = oneshot::channel::<()>();
         let mut stdin = stdin;
         tokio::spawn(async move {
-            while let Some(msg) = writer_rx.recv().await {
+            loop {
+                let msg = tokio::select! {
+                    msg = writer_rx.recv() => match msg {
+                        Some(msg) => msg,
+                        None => break,
+                    },
+                    _ = &mut reader_eof_rx => break,
+                };
                 if stdin.write_all(msg.as_bytes()).await.is_err() {
                     break;
                 }
@@ -234,6 +254,7 @@ impl McpClient {
         let reader_name = name.clone();
         let mut reader = BufReader::new(stdout);
         tokio::spawn(async move {
+            let _reader_eof_tx = reader_eof_tx;
             let mut line = String::new();
             loop {
                 line.clear();
@@ -351,6 +372,11 @@ impl McpClient {
             Ok(Some(_)) => false,
             Err(_) => false,
         }
+    }
+
+    /// True when the handle's transport is gone (see `McpHandle::is_closed`).
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_closed()
     }
 
     /// Shutdown the server

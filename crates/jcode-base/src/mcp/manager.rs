@@ -363,6 +363,14 @@ impl McpManager {
         tool: &str,
         arguments: serde_json::Value,
     ) -> Result<ToolCallResult> {
+        // A handle whose child died (stdout EOF, reaped, `mcp reload` on another
+        // session) stays in the map and answers every call with
+        // "Failed to send request: channel closed" in 0ms, forever. Measured
+        // 2026-11: 9 such calls in a month, each one a tool the model gave up on,
+        // and the only cure was a manual `mcp reload`. Evict it here so the call
+        // takes the connect-on-first-call path below instead.
+        self.evict_if_closed(server).await;
+
         // Fast path: already connected via pool handle.
         {
             let handles = self.pool_handles.read().await;
@@ -423,6 +431,43 @@ impl McpManager {
         }
 
         anyhow::bail!("MCP server '{}' not connected", server)
+    }
+
+    /// Drop a handle or client whose transport is closed so the next call
+    /// reconnects instead of failing instantly forever. For a pool handle the
+    /// pool's own client must go too: `connect_server` on a name the pool still
+    /// holds returns `Connected` and would hand back the same dead handle.
+    async fn evict_if_closed(&self, server: &str) {
+        let pool_dead = self
+            .pool_handles
+            .read()
+            .await
+            .get(server)
+            .is_some_and(McpHandle::is_closed);
+        if pool_dead {
+            self.pool_handles.write().await.remove(server);
+            if let Some(pool) = &self.pool {
+                pool.disconnect_server(server).await;
+            }
+            crate::logging::warn(&format!(
+                "MCP: '{server}' transport closed (child exited); dropped the dead handle, next call reconnects"
+            ));
+            return;
+        }
+        let owned_dead = self
+            .owned_clients
+            .read()
+            .await
+            .get(server)
+            .is_some_and(McpClient::is_closed);
+        if owned_dead {
+            if let Some(mut client) = self.owned_clients.write().await.remove(server) {
+                client.shutdown().await;
+            }
+            crate::logging::warn(&format!(
+                "MCP: '{server}' transport closed (child exited); dropped the dead client, next call reconnects"
+            ));
+        }
     }
 
     /// Ensure a configured server is connected, bounded by `timeout`. No-op if
@@ -702,6 +747,9 @@ while IFS= read -r line; do
       echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"tools":[{"name":"create_card","description":"fake card","inputSchema":{"type":"object"}}]}}'
       ;;
     *'"tools/call"'*)
+      case "$line" in
+        *'"name":"die"'*) exit 3 ;;
+      esac
       echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"content":[{"type":"text","text":"card created"}],"isError":false}}'
       ;;
     *'"shutdown"'*)
@@ -794,6 +842,78 @@ done
         assert_eq!(reports[0].connects, 1);
         assert_eq!(reports[0].calls, 1);
         assert_eq!(reports[0].errors, 0);
+
+        manager.disconnect_all().await;
+        drop(env_guard);
+    }
+
+    /// A server whose process died mid-session used to stay in the handle map
+    /// and answer every later call with "Failed to send request: channel closed"
+    /// in 0ms until someone ran `mcp reload` (9 such calls in 2026-11 logs). The
+    /// call after death must drop the dead handle and reconnect on its own.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn call_after_child_death_reconnects_instead_of_channel_closed() {
+        let env_guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::sponsors::provenance::reset_for_tests();
+        let server_path = write_fake_mcp_server(temp.path());
+        let mut config = McpConfig::default();
+        config.servers.insert(
+            "flaky".to_string(),
+            McpServerConfig {
+                command: server_path.to_string_lossy().to_string(),
+                args: vec![],
+                env: HashMap::new(),
+                shared: false,
+                transport: None,
+                url: None,
+                headers: std::collections::HashMap::new(),
+                enabled: None,
+                disabled: None,
+                timeout_secs: Some(5),
+            },
+        );
+        let manager = McpManager::with_config(config.clone());
+        let server_config = config.servers.get("flaky").unwrap().clone();
+        manager.connect("flaky", &server_config).await.unwrap();
+
+        let ok = manager
+            .call_tool("flaky", "create_card", serde_json::json!({}))
+            .await
+            .expect("first call on a live server");
+        assert!(!ok.is_error);
+
+        // The server exits on this call; the request itself fails (reply never
+        // comes) and that is fine. What matters is the NEXT call.
+        let died = manager
+            .call_tool("flaky", "die", serde_json::json!({}))
+            .await;
+        assert!(died.is_err(), "the killing call cannot succeed");
+
+        // Give the reader task its EOF so the handle reports closed.
+        let mut closed = false;
+        for _ in 0..50 {
+            if manager
+                .owned_clients
+                .read()
+                .await
+                .get("flaky")
+                .is_some_and(McpClient::is_closed)
+            {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(closed, "handle must report closed once the child's stdout hit EOF");
+
+        let after = manager
+            .call_tool("flaky", "create_card", serde_json::json!({}))
+            .await
+            .expect("call after child death must reconnect, not fail with channel closed");
+        assert!(!after.is_error);
 
         manager.disconnect_all().await;
         drop(env_guard);
