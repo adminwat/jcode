@@ -38,6 +38,7 @@ fn release_policy_is_exact_and_development_has_no_fallback() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod shell {
     use super::*;
+    use std::path::Path;
     use std::os::unix::fs::PermissionsExt;
 
     struct Fixture {
