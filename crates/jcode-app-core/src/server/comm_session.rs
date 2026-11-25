@@ -177,7 +177,7 @@ fn spawn_visible_session_window_with_context(
 mod spawn_model_selection;
 use spawn_model_selection::{
     CoordinatorSpawnIdentity, SwarmSpawnSelection, provider_key_for_spawn_model,
-    resolve_coordinator_spawn_identity, resolve_registry_model, resolve_swarm_spawn_selection,
+    registry_requested_model, resolve_coordinator_spawn_identity, resolve_swarm_spawn_selection,
     session_swarm_model,
 };
 
@@ -399,18 +399,14 @@ pub(super) async fn spawn_swarm_agent(
     agents_config
         .validate_swarm_model_request(requested_model.as_deref())
         .map_err(anyhow::Error::msg)?;
-    let requested_model = match requested_model {
-        Some(model) if agents_config.swarm_model_registry && !is_inherit_sentinel(model.trim()) => {
-            // Same live catalog `swarm list_models` shows; never a static list.
-            let agent = sessions.read().await.get(req_session_id).cloned();
-            let routes = match agent.as_ref().and_then(|a| a.try_lock().ok()) {
-                Some(guard) => guard.model_routes(),
-                None => provider_template.model_routes(),
-            };
-            Some(resolve_registry_model(&model, &routes).map_err(anyhow::Error::msg)?)
-        }
-        other => other,
-    };
+    let requested_model = registry_requested_model(
+        requested_model,
+        agents_config.swarm_model_registry,
+        req_session_id,
+        sessions,
+        provider_template,
+    )
+    .await?;
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;

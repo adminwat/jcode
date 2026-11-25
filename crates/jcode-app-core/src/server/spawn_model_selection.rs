@@ -224,6 +224,29 @@ pub(super) fn resolve_swarm_spawn_selection(
     }
 }
 
+/// Registry mode: resolve a concrete requested model against the requesting
+/// session's live catalog (same as `swarm list_models`), else the template's.
+pub(super) async fn registry_requested_model(
+    requested: Option<String>,
+    registry_mode: bool,
+    req_session_id: &str,
+    sessions: &SessionAgents,
+    provider_template: &Arc<dyn Provider>,
+) -> anyhow::Result<Option<String>> {
+    let model = match requested {
+        Some(m) if registry_mode && !is_inherit_sentinel(m.trim()) => m,
+        other => return Ok(other),
+    };
+    let agent = sessions.read().await.get(req_session_id).cloned();
+    let routes = match agent.as_ref().and_then(|a| a.try_lock().ok()) {
+        Some(guard) => guard.model_routes(),
+        None => provider_template.model_routes(),
+    };
+    resolve_registry_model(&model, &routes)
+        .map(Some)
+        .map_err(anyhow::Error::msg)
+}
+
 /// Resolve an agent-requested worker model against the live route catalog
 /// (`Provider::model_routes`). Accepts `model` or `model@<api_method>` (the
 /// `[api_method]` shown by `swarm list_models`). Returns the spawn model string
@@ -273,3 +296,7 @@ pub(super) fn resolve_registry_model(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "comm_session_registry_tests.rs"]
+mod registry_tests;
