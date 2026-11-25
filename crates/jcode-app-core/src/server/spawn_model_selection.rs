@@ -223,3 +223,53 @@ pub(super) fn resolve_swarm_spawn_selection(
         None => inherit_coordinator_selection(coordinator),
     }
 }
+
+/// Resolve an agent-requested worker model against the live route catalog
+/// (`Provider::model_routes`). Accepts `model` or `model@<api_method>` (the
+/// `[api_method]` shown by `swarm list_models`). Returns the spawn model string
+/// to pass on (route-pinned when the route carries an explicit credential), or
+/// an error listing every available route so the caller can retry.
+pub(super) fn resolve_registry_model(
+    requested: &str,
+    routes: &[jcode_provider_core::ModelRoute],
+) -> Result<String, String> {
+    let requested = requested.trim();
+    // Bare model first; else `model@api_method` (api_method may itself contain '@').
+    let (model, method) = match requested.split_once('@') {
+        Some((m, api)) if !routes.iter().any(|r| r.model == requested) => (m, Some(api)),
+        _ => (requested, None),
+    };
+    let mut candidates = routes.iter().filter(|r| {
+        r.available && r.model == model && method.is_none_or(|api| r.api_method == api)
+    });
+    match candidates.next() {
+        Some(route) => {
+            let pinned = format!("{}:{}", route.api_method, route.model);
+            // Only pin when the api_method is a prefix the spawn path understands;
+            // otherwise the bare model lets the normal provider resolution run.
+            Ok(
+                if explicit_route_for_configured_model(&pinned).is_some()
+                    || jcode_provider_core::oauth_account_label(&route.api_method).is_some()
+                {
+                    pinned
+                } else {
+                    route.model.clone()
+                },
+            )
+        }
+        None => {
+            let mut avail: Vec<String> = routes
+                .iter()
+                .filter(|r| r.available)
+                .map(|r| format!("{}@{}", r.model, r.api_method))
+                .collect();
+            avail.sort();
+            avail.dedup();
+            Err(format!(
+                "Model '{requested}' is not an available configured route. Available ({}):\n{}",
+                avail.len(),
+                avail.join("\n")
+            ))
+        }
+    }
+}
