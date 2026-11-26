@@ -169,13 +169,23 @@ impl Policy {
         {
             return tier("mutating_tier", CODE_TIER);
         }
-        let files: HashSet<&str> = self
+        let re = match self
             .raw
             .pointer("/swarm_classification/file_token_regex")
             .and_then(Value::as_str)
-            .and_then(|r| regex::Regex::new(r).ok())
-            .map(|re| re.find_iter(&p).map(|m| m.as_str()).collect())
-            .unwrap_or_default();
+            .map(regex::Regex::new)
+        {
+            Some(Ok(re)) => Some(re),
+            Some(Err(e)) => {
+                crate::logging::warn(&format!("routing-policy file_token_regex invalid: {e}"));
+                None
+            }
+            None => None,
+        };
+        let files: HashSet<&str> = match &re {
+            Some(re) => re.find_iter(&p).map(|m| m.as_str()).collect(),
+            None => HashSet::new(),
+        };
         let small = self
             .num("/swarm_classification/small_max_files")
             .unwrap_or(3) as usize;
@@ -537,23 +547,37 @@ pub(crate) fn state_path() -> Option<std::path::PathBuf> {
 pub(crate) fn with_state<T>(f: impl FnOnce(&mut SharedState) -> T) -> Option<T> {
     use std::os::unix::io::AsRawFd;
     let path = state_path()?;
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    if let Some(dir) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(dir)
+    {
+        crate::logging::warn(&format!("router-state dir: {e}"));
     }
-    let lock = std::fs::OpenOptions::new()
+    let lock = match std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(path.with_extension("lock"))
-        .ok()?;
+    {
+        Ok(f) => f,
+        Err(e) => {
+            crate::logging::warn(&format!("router-state lock: {e}"));
+            return None;
+        }
+    };
     if unsafe { ::libc::flock(lock.as_raw_fd(), ::libc::LOCK_EX) } != 0 {
         return None;
     }
     // A corrupt or missing file starts fresh; the lock still serializes writers.
-    let mut st: SharedState = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
+    let mut st: SharedState = match std::fs::read_to_string(&path) {
+        Ok(t) => match serde_json::from_str(&t) {
+            Ok(st) => st,
+            Err(e) => {
+                crate::logging::warn(&format!("router-state corrupt, resetting: {e}"));
+                SharedState::default()
+            }
+        },
+        Err(_) => SharedState::default(), // first use: no file yet
+    };
     let now = now_s();
     st.local_slots
         .retain(|_, (pid, until)| *until > now && pid_alive(*pid));
@@ -615,9 +639,10 @@ impl Policy {
             .and_then(Value::as_str)
             .unwrap_or("JCODE_ROUTE_TIER_MODEL_")
             .trim_end_matches("<TIER>");
-        std::env::var(format!("{prefix}{}", tier.to_uppercase()))
-            .ok()
-            .filter(|v| !v.trim().is_empty())
+        match std::env::var(format!("{prefix}{}", tier.to_uppercase())) {
+            Ok(v) if !v.trim().is_empty() => Some(v),
+            _ => None, // unset or blank: no override
+        }
     }
 }
 
@@ -692,10 +717,12 @@ pub(crate) fn dispatch(
                 excluded.extend(ex.iter().cloned());
             }
             let ranked = policy.rank(tier, routes, &approved, payload_tokens, &excluded, probe);
-            let pinned = pins().lock().ok().and_then(|m| {
-                m.get(&(session_id.to_string(), tier.to_string()))
-                    .map(|p| p.0.clone())
-            });
+            let pinned = match pins().lock() {
+                Ok(m) => m
+                    .get(&(session_id.to_string(), tier.to_string()))
+                    .map(|p| p.0.clone()),
+                Err(_) => None, // poisoned pin map: no sticky preference
+            };
             let ok = |(r, b): &&(&ModelRoute, Billing)| {
                 (!over_budget || policy.over_budget_allowed(*b))
                     && (*b != Billing::Local

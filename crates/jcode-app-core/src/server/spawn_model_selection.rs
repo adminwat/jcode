@@ -227,12 +227,11 @@ pub(super) fn resolve_swarm_spawn_selection(
 /// Registry mode: resolve a concrete requested model against the requesting
 /// session's live catalog (same as `swarm list_models`), else the template's.
 pub(super) async fn registry_requested_model(
-    requested: Option<String>,
+    (requested, prompt): (Option<String>, &str),
     registry_mode: bool,
     req_session_id: &str,
     sessions: &SessionAgents,
     provider_template: &Arc<dyn Provider>,
-    prompt: &str,
 ) -> anyhow::Result<Option<String>> {
     let model = match requested {
         Some(m) if registry_mode && !is_inherit_sentinel(m.trim()) => m,

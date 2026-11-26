@@ -380,3 +380,15 @@ fn env_override_reads_tier_variable() {
     unsafe { std::env::remove_var("JCODE_ROUTE_TIER_MODEL_CODE_EXECUTION") };
     assert_eq!(p.env_override(CODE_TIER), None);
 }
+
+#[test]
+fn corrupt_router_state_resets_instead_of_failing() {
+    with_tmp_state(|| {
+        let path = state_path().unwrap();
+        std::fs::write(&path, "{not json").unwrap();
+        assert_eq!(with_state(|s| s.breakers.len()), Some(0));
+        let p = Policy::from_json(POLICY).unwrap();
+        assert!(p.trip("r", "timeout"));
+        assert_eq!(with_state(|s| s.breakers.contains_key("r")), Some(true));
+    });
+}

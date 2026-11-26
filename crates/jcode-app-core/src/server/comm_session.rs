@@ -400,12 +400,11 @@ pub(super) async fn spawn_swarm_agent(
         .validate_swarm_model_request(requested_model.as_deref())
         .map_err(anyhow::Error::msg)?;
     let requested_model = registry_requested_model(
-        requested_model,
+        (requested_model, initial_message.as_deref().unwrap_or("")),
         agents_config.swarm_model_registry,
         req_session_id,
         sessions,
         provider_template,
-        initial_message.as_deref().unwrap_or_default(),
     )
     .await?;
     let resolved_working_dir =
