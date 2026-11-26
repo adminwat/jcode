@@ -392,3 +392,22 @@ fn corrupt_router_state_resets_instead_of_failing() {
         assert_eq!(with_state(|s| s.breakers.contains_key("r")), Some(true));
     });
 }
+
+#[test]
+fn shared_state_lock_serializes_concurrent_writers() {
+    with_tmp_state(|| {
+        let hs: Vec<_> = (0..8)
+            .map(|_| {
+                let p = std::env::var("JCODE_ROUTER_STATE").unwrap();
+                std::thread::spawn(move || {
+                    unsafe { std::env::set_var("JCODE_ROUTER_STATE", p) };
+                    with_state(|s| *s.metered_tokens.entry("c".into()).or_default() += 1)
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        assert_eq!(with_state(|s| s.metered_tokens["c"]), Some(8));
+    });
+}

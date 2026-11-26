@@ -529,10 +529,17 @@ fn now_s() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+#[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     // kill(pid, 0): 0 = alive, EPERM = alive but not ours.
     let alive = unsafe { ::libc::kill(pid as ::libc::pid_t, 0) == 0 };
     alive || std::io::Error::last_os_error().raw_os_error() == Some(::libc::EPERM)
+}
+
+// shortcut: no liveness probe off unix; slots still expire with their lease.
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> bool {
+    true
 }
 
 pub(crate) fn state_path() -> Option<std::path::PathBuf> {
@@ -545,7 +552,6 @@ pub(crate) fn state_path() -> Option<std::path::PathBuf> {
 /// Run `f` on the shared state under an exclusive flock; drops dead-pid slots
 /// and expired breakers first. `None` when the state file is unreachable.
 pub(crate) fn with_state<T>(f: impl FnOnce(&mut SharedState) -> T) -> Option<T> {
-    use std::os::unix::io::AsRawFd;
     let path = state_path()?;
     if let Some(dir) = path.parent()
         && let Err(e) = std::fs::create_dir_all(dir)
@@ -564,7 +570,8 @@ pub(crate) fn with_state<T>(f: impl FnOnce(&mut SharedState) -> T) -> Option<T> 
             return None;
         }
     };
-    if unsafe { ::libc::flock(lock.as_raw_fd(), ::libc::LOCK_EX) } != 0 {
+    if let Err(e) = lock.lock() {
+        crate::logging::warn(&format!("router-state flock: {e}"));
         return None;
     }
     // A corrupt or missing file starts fresh; the lock still serializes writers.
@@ -591,7 +598,7 @@ pub(crate) fn with_state<T>(f: impl FnOnce(&mut SharedState) -> T) -> Option<T> 
     if let Err(e) = written {
         crate::logging::warn(&format!("router-state write failed: {e}"));
     }
-    unsafe { ::libc::flock(lock.as_raw_fd(), ::libc::LOCK_UN) };
+    drop(lock); // closing the file releases the lock
     Some(out)
 }
 
