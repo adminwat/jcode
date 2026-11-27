@@ -309,6 +309,7 @@ pub fn turn_finished(session_id: &str, error: Option<&str>) {
     with_tracker(|t, now| t.turn_finished(session_id, error, now));
 }
 pub fn session_closed(session_id: &str) {
+    crate::server::turn_failover::best_fit_router::release_local_slot(session_id);
     with_tracker(|t, now| t.session_closed(session_id, now));
 }
 

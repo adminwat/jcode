@@ -291,12 +291,9 @@ impl Policy {
             .filter(|(_, b)| self.allowed(*b) && prefer.iter().any(|p| p == b.as_str()))
             .filter(|(r, _)| !need_tools || self.supports_tools(r))
             // Unknown window passes only when no floor applies.
-            // shortcut: an unadvertised window passes the static floor but never a payload
-            // escalation above it; tighten once every route advertises its window.
-            .filter(|(r, _)| match self.context_window(r) {
-                Some(c) => c >= need_ctx,
-                None => need_ctx <= min_ctx,
-            })
+            // Most live routes (oauth, local) advertise no window: they stay eligible and
+            // only routes with a known, too-small window are dropped.
+            .filter(|(r, _)| self.context_window(r).is_none_or(|c| c >= need_ctx))
             // A local route is only eligible while its endpoint answers within 2s.
             .filter(|(r, b)| *b != Billing::Local || probe(r))
             .collect();
@@ -393,11 +390,13 @@ pub(crate) fn local_probe(route: &ModelRoute) -> bool {
     {
         return ok;
     }
+    // `localhost` resolves to ::1 first while many local servers bind only 127.0.0.1.
     let ok = match addr.to_socket_addrs() {
-        Ok(mut a) => a.next(),
-        Err(_) => None, // unresolvable host counts as cold
-    }
-    .is_some_and(|sa| std::net::TcpStream::connect_timeout(&sa, Duration::from_secs(2)).is_ok());
+        Ok(a) => a
+            .into_iter()
+            .any(|sa| std::net::TcpStream::connect_timeout(&sa, Duration::from_secs(2)).is_ok()),
+        Err(_) => false, // unresolvable host counts as cold
+    };
     if let Ok(mut c) = cache.lock() {
         c.insert(addr, (Instant::now(), ok));
     }
@@ -511,8 +510,8 @@ pub(crate) fn telemetry(event: Value) {
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub(crate) struct SharedState {
     /// local route id -> (holder pid, lease expiry unix s) for max_concurrent_local.
-    /// shortcut: a lease expires instead of being released on worker exit; wire an
-    /// explicit release when swarm member completion reaches this module.
+    /// Released by `LocalSlot::drop` when the worker finishes; the lease only
+    /// recovers slots from crashed processes.
     #[serde(default)]
     pub local_slots: HashMap<String, (u32, u64)>,
     /// route id -> unix seconds until which the breaker is open
@@ -681,6 +680,63 @@ pub(crate) fn catalog_ttl(
     routes
 }
 
+/// RAII hold on a `max_concurrent_local` slot: dropping it frees the slot in
+/// the shared state file (only if this process still holds it).
+#[derive(Debug)]
+pub(crate) struct LocalSlot {
+    route: String,
+    pid: u32,
+}
+
+impl Drop for LocalSlot {
+    fn drop(&mut self) {
+        let released = with_state(|st| {
+            if st
+                .local_slots
+                .get(&self.route)
+                .is_some_and(|s| s.0 == self.pid)
+            {
+                st.local_slots.remove(&self.route);
+                true
+            } else {
+                false
+            }
+        });
+        if released == Some(true) {
+            telemetry(serde_json::json!({"event": "local_slot_release", "route": self.route}));
+        }
+    }
+}
+
+/// Slots claimed at dispatch, first keyed by coordinator (before the worker
+/// id exists), then by worker session once `bind_local_slot` runs.
+fn slot_holders() -> &'static Mutex<HashMap<String, LocalSlot>> {
+    static H: OnceLock<Mutex<HashMap<String, LocalSlot>>> = OnceLock::new();
+    H.get_or_init(Default::default)
+}
+
+fn pending_key(coordinator: &str) -> String {
+    format!("pending:{coordinator}")
+}
+
+/// Move the coordinator's freshly claimed slot onto the spawned worker.
+pub(crate) fn bind_local_slot(coordinator: &str, worker: &str) {
+    if let Ok(mut h) = slot_holders().lock()
+        && let Some(slot) = h.remove(&pending_key(coordinator))
+    {
+        h.insert(worker.to_string(), slot);
+    }
+}
+
+/// Worker finished/stopped/removed: drop its slot (no-op when it holds none).
+pub(crate) fn release_local_slot(worker: &str) {
+    let slot = match slot_holders().lock() {
+        Ok(mut h) => h.remove(worker),
+        Err(_) => None, // poisoned map: the lease TTL recovers the slot
+    };
+    drop(slot); // outside the map lock: Drop takes the file lock
+}
+
 /// Outcome of a tiered dispatch.
 #[derive(Debug, Clone)]
 pub(crate) struct Dispatch {
@@ -708,7 +764,8 @@ pub(crate) fn dispatch(
     let payload_tokens = policy.estimate_tokens(prompt);
     let approved = approved_profiles();
     let max_local = policy.max_local();
-    with_state(|st| {
+    let mut claimed = None;
+    let out = with_state(|st| {
         let spent = st.metered_tokens.get(session_id).copied().unwrap_or(0);
         let over_budget = policy
             .budget()
@@ -753,6 +810,10 @@ pub(crate) fn dispatch(
                         .num("/invariants/shared_state/local_lease_s")
                         .unwrap_or(600);
                     st.local_slots.insert(route_id(r), (pid, now_s() + lease));
+                    claimed = Some(LocalSlot {
+                        route: route_id(r),
+                        pid,
+                    });
                 }
                 if matches!(b, Billing::MeteredApproved | Billing::Metered) {
                     *st.metered_tokens.entry(session_id.to_string()).or_default() += payload_tokens;
@@ -770,7 +831,16 @@ pub(crate) fn dispatch(
             tier = policy.spill_to(tier)?;
         }
     })
-    .flatten()
+    .flatten();
+    // Register after the state lock is released; a replaced pending slot drops here.
+    if let Some(slot) = claimed {
+        let prev = match slot_holders().lock() {
+            Ok(mut h) => h.insert(pending_key(session_id), slot),
+            Err(_) => None, // poisoned map: the lease TTL recovers the slot
+        };
+        drop(prev);
+    }
+    out
 }
 
 #[cfg(test)]

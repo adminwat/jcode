@@ -411,3 +411,72 @@ fn shared_state_lock_serializes_concurrent_writers() {
         assert_eq!(with_state(|s| s.metered_tokens["c"]), Some(8));
     });
 }
+
+#[test]
+fn live_shaped_routes_without_metadata_resolve_every_tier() {
+    // Live list_models rows: no cheapness, no advertised window.
+    let p = Policy::from_json(POLICY).unwrap();
+    let r = vec![
+        route("m-oauth", "code-assist-oauth", "", None, 0),
+        route("m-acct", "claude-oauth@acct", "account acct", None, 0),
+        route(
+            "m-loc",
+            "openai-compatible:l",
+            "http://localhost:11434/v1",
+            None,
+            0,
+        ),
+    ];
+    for tier in ALL_TIERS {
+        let ranked = p.rank(tier, &r, &HashSet::new(), 1_000, &HashSet::new(), &|_| true);
+        assert!(!ranked.is_empty(), "{tier} resolved nothing");
+    }
+    let cold = p.rank(SWARM_TIER, &r, &HashSet::new(), 0, &HashSet::new(), &|_| {
+        false
+    });
+    assert_eq!(cold[0].1, Billing::Oauth);
+}
+
+#[test]
+fn local_probe_tries_every_resolved_address() {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    // `localhost` may resolve to ::1 first; the IPv4 listener must still count.
+    let r = route(
+        "m",
+        "openai-compatible:x",
+        &format!("http://localhost:{port}/v1"),
+        None,
+        0,
+    );
+    assert!(local_probe(&r));
+}
+
+#[test]
+fn local_slot_released_on_worker_exit() {
+    with_tmp_state(|| {
+        let p = Policy::from_json(POLICY).unwrap();
+        let r = vec![route(
+            "loc",
+            "openai-compatible:l",
+            "(http://127.0.0.1:9/v1)",
+            None,
+            0,
+        )];
+        let d = dispatch(
+            &p,
+            "coord-rel",
+            "read a.rs",
+            &r,
+            &|_| true,
+            std::process::id(),
+        )
+        .unwrap();
+        assert_eq!(d.billing, Billing::Local);
+        assert_eq!(with_state(|s| s.local_slots.len()), Some(1));
+        bind_local_slot("coord-rel", "worker-rel");
+        release_local_slot("worker-rel");
+        assert_eq!(with_state(|s| s.local_slots.len()), Some(0));
+        release_local_slot("worker-rel"); // idempotent
+    });
+}

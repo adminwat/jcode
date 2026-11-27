@@ -110,7 +110,9 @@ async fn resume_session_restores_persisted_compaction_for_provider_context() -> 
             .join("\n---\n");
         assert!(joined.contains("recent preserved turn"));
         assert!(joined.contains("continue from the restored session"));
-        assert!(!joined.contains("older user turn"));
+        // The first human task is pinned verbatim after compaction (compaction.rs
+        // `pinned_root_prompt`); the compacted assistant turn must be gone.
+        assert_eq!(joined.matches("older user turn").count(), 1);
         assert!(!joined.contains("older assistant turn"));
 
         Ok::<_, anyhow::Error>(())
