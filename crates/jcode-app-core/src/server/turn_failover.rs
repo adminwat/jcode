@@ -86,6 +86,19 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
     if !super::provider_control::automatic_failover_source_is_pool_member(agent) {
         return None;
     }
+    // A manual pin holds unless its route's breaker is open.
+    if let Some((spec, route, until)) = best_fit_router::manual_pin(agent.session_id())
+        && until.is_none()
+    {
+        let throttled = current_spec(agent) == spec
+            && best_fit_router::step_down_reason(error).is_some()
+            && best_fit_router::Policy::load()
+                .and_then(|p| best_fit_router::throttle_pin(&p, &route))
+                .is_some();
+        if !throttled {
+            return None;
+        }
+    }
     let routes = agent.model_routes();
     let route_for_spec = |spec: &str| {
         routes
@@ -141,6 +154,60 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
                 label: describe_route(route),
             }
         })
+}
+
+/// Routed spec of the agent's current route.
+pub(super) fn current_spec(agent: &Agent) -> String {
+    let model = agent.provider_model();
+    let method = agent.session_route_api_method().unwrap_or_default();
+    agent
+        .model_routes()
+        .iter()
+        .find(|r| r.model == model && (method.is_empty() || r.api_method == method))
+        .map(|r| RouteSelection::from_model_route(r).routed_model_spec())
+        .unwrap_or(model)
+}
+
+/// Persist a user's manual route pick as the session pin.
+pub(super) fn record_manual_pin(agent: &Agent, selection: &RouteSelection) {
+    let spec = selection.routed_model_spec();
+    let route = agent
+        .model_routes()
+        .iter()
+        .find(|r| RouteSelection::from_model_route(r).routed_model_spec() == spec)
+        .map(best_fit_router::route_id)
+        .unwrap_or_else(|| format!("{}@{}", selection.model, selection.api_method));
+    best_fit_router::set_manual_pin(agent.session_id(), &spec, &route);
+}
+
+/// At turn entry: once a throttled pin's cooldown has expired, switch back to
+/// the pinned route; always publish the selection status line.
+pub(super) fn restore_manual_pin(agent: &mut Agent, event_tx: &mpsc::UnboundedSender<ServerEvent>) {
+    let Some((spec, _, until)) = best_fit_router::manual_pin(agent.session_id()) else {
+        return;
+    };
+    if until.is_none() && current_spec(agent) != spec {
+        let route = agent.model_routes().into_iter().find(|r| {
+            r.available && RouteSelection::from_model_route(r).routed_model_spec() == spec
+        });
+        if let Some(route) = route {
+            let target = FailoverTarget {
+                selection: Some(RouteSelection::from_model_route(&route)),
+                label: describe_route(&route),
+                spec: spec.clone(),
+            };
+            if let Err(e) = apply_failover_target(agent, &target, event_tx) {
+                crate::logging::warn(&format!("manual pin restore to {spec} failed: {e}"));
+            }
+        }
+    }
+    let _ = event_tx.send(ServerEvent::StatusDetail {
+        detail: best_fit_router::selection_status(
+            agent.session_id(),
+            &current_spec(agent),
+            best_fit_router::PARENT_TIER,
+        ),
+    });
 }
 
 /// Apply `target` to the agent and tell every attached client.
@@ -218,6 +285,7 @@ pub(super) async fn process_reserved_message_with_server_failover(
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;
+    restore_manual_pin(&mut guard, &event_tx);
     let result = super::client_lifecycle::process_reserved_message_streaming_mpsc_with_schema(
         &mut guard,
         lease,
@@ -275,6 +343,7 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> anyhow::Result<()> {
     agent.validate_server_turn(lease)?;
+    restore_manual_pin(agent, &event_tx);
     let reminder = system_reminder.clone();
     let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
         agent,

@@ -480,3 +480,30 @@ fn local_slot_released_on_worker_exit() {
         release_local_slot("worker-rel"); // idempotent
     });
 }
+
+#[test]
+fn manual_pin_beats_tier_until_breaker_then_reports_fallback() {
+    with_tmp_state(|| {
+        let p = Policy::from_json(POLICY).unwrap();
+        assert!(manual_pin("s-pin").is_none());
+        assert_eq!(
+            selection_status("s-pin", "a:x", "parent"),
+            "Auto (parent): a:x"
+        );
+        set_manual_pin("s-pin", "a:x", "x@a");
+        let (spec, route, until) = manual_pin("s-pin").unwrap();
+        assert_eq!((spec.as_str(), route.as_str(), until), ("a:x", "x@a", None));
+        assert_eq!(selection_status("s-pin", "a:x", "parent"), "Pinned: a:x");
+        // Throttle opens the breaker; status names the fallback and reset time.
+        let until = throttle_pin(&p, "x@a").unwrap();
+        assert_eq!(manual_pin("s-pin").unwrap().2, Some(until));
+        let s = selection_status("s-pin", "b:y", "parent");
+        assert!(
+            s.starts_with("Throttled (a:x, resets ") && s.ends_with(") -> Fallback: b:y"),
+            "{s}"
+        );
+        // Expired breaker: pin is live again (auto-restore precondition).
+        with_state(|st| st.breakers.insert("x@a".into(), 1));
+        assert_eq!(manual_pin("s-pin").unwrap().2, None);
+    });
+}
