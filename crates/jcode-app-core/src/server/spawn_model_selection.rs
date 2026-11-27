@@ -317,11 +317,14 @@ pub(super) async fn best_fit_swarm_model(
 ) -> Option<String> {
     use super::super::turn_failover::best_fit_router as bf;
     let policy = bf::Policy::load()?;
-    let tier = policy.classify_spawn(prompt);
+    let class = policy.classify_spawn_detail(prompt);
+    let tier = class.tier;
     if let Some(model) = policy.env_override(tier) {
         bf::telemetry(serde_json::json!({
             "event": "swarm_dispatch", "session_id": req_session_id, "tier": tier,
             "route": model, "billing": "env_override", "source": "env_override",
+            "reason": format!("{};env_override", class.reason),
+            "mutating": class.mutating, "files": class.files,
         }));
         return Some(model);
     }
@@ -347,19 +350,12 @@ pub(super) async fn best_fit_swarm_model(
         crate::logging::warn(&format!("best-fit pick task failed: {e}"));
         None
     });
-    bf::telemetry(serde_json::json!({
-        "event": "swarm_dispatch",
-        "session_id": req_session_id,
-        "source": "routing-policy.json",
-        "requested_tier": picked.as_ref().map_or(tier, |d| d.requested_tier),
-        "tier": picked.as_ref().map(|d| d.tier),
-        "route": picked.as_ref().map(|d| bf::route_id(&d.route)),
-        "billing": picked.as_ref().map(|d| d.billing.as_str()),
-        "sticky": picked.as_ref().map(|d| d.sticky),
-        "over_budget": picked.as_ref().map(|d| d.over_budget),
-        "payload_tokens": picked.as_ref().map(|d| d.payload_tokens),
-        "ms": started.elapsed().as_millis() as u64,
-    }));
+    bf::telemetry(bf::dispatch_event(
+        req_session_id,
+        &class,
+        picked.as_ref(),
+        started.elapsed(),
+    ));
     let route = picked?.route;
     match resolve_registry_model(&bf::route_id(&route), std::slice::from_ref(&route)) {
         Ok(model) => {

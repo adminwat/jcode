@@ -1186,3 +1186,15 @@ fn test_multiline_reasoning_renders_one_visual_line_per_thought() {
 }
 
 include!("rendering_reasoning_tests.rs");
+
+#[test]
+fn mermaid_fence_passes_fallback_unstripped_with_labels_and_braces() {
+    let md = "Before\n\n```mermaid\nflowchart TD\n  A[Start] --> B{OK?}\n  B -- yes --> C[Done]\n  B -->|no| A\n```\n\nAfter";
+    let text = lines_to_string(&with_mermaid_rendering_override(Some(true), || {
+        mermaid::with_image_protocol_override(Some(false), || render_markdown(md))
+    }));
+    for want in ["Before", "flowchart TD", "A[Start] --> B{OK?}", "B -- yes --> C[Done]", "B -->|no| A", "After"] {
+        assert!(text.contains(want), "missing {want:?}: {text}");
+    }
+    assert!(!text.contains("```"), "raw fence leaked: {text}");
+}
