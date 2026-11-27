@@ -1306,12 +1306,13 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         let message_count = agent.lock().await.message_count();
         let event_count = event_counter.load(std::sync::atomic::Ordering::Relaxed);
 
-        // A stale History continuation arriving after the final answer is a
-        // no-op even if it carries an invalid skill. No turn/skill/status edits.
+        // A stale reminder-only History continuation arriving after the final
+        // answer is a no-op even if it carries an invalid skill. (A replay with
+        // queued user content runs instead, see e6d9cb47c.)
         start_processing_message(
             ProcessingMessage {
                 id: 78,
-                content: "continue after reload".to_string(),
+                content: String::new(),
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
                 active_skill: Some("nonexistent-replay-skill".to_string()),
@@ -1348,10 +1349,11 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             event_count
         );
         assert!(processing_done_rx.try_recv().is_err());
-        assert!(matches!(
-            client_event_rx.try_recv(),
-            Ok(ServerEvent::Done { id: 78 })
-        ));
+        let event = client_event_rx.try_recv();
+        assert!(
+            matches!(event, Ok(ServerEvent::Done { id: 78 })),
+            "expected Done {{ id: 78 }}, got {event:?}"
+        );
         assert!(client_event_rx.try_recv().is_err());
 
         // Unrelated reminders and ordinary prompts (even the exact body) are
