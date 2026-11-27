@@ -561,13 +561,14 @@ pub(crate) fn throttle_pin(policy: &Policy, route: &str) -> Option<u64> {
 pub(crate) fn selection_status(session_id: &str, current: &str, tier: &str) -> String {
     match manual_pin(session_id) {
         Some((spec, _, Some(until))) if spec != current => {
-            let at = chrono::DateTime::from_timestamp(until as i64, 0)
-                .map(|t| {
+            let at = chrono::DateTime::from_timestamp(until as i64, 0).map_or_else(
+                || "?".to_string(),
+                |t| {
                     t.with_timezone(&chrono::Local)
                         .format("%H:%M:%S")
                         .to_string()
-                })
-                .unwrap_or_default();
+                },
+            );
             format!("Throttled ({spec}, resets {at}) -> Fallback: {current}")
         }
         Some((spec, _, _)) if spec == current => format!("Pinned: {current}"),

@@ -507,3 +507,17 @@ fn manual_pin_beats_tier_until_breaker_then_reports_fallback() {
         assert_eq!(manual_pin("s-pin").unwrap().2, None);
     });
 }
+
+#[test]
+fn throttle_pin_keeps_existing_cooldown_and_status_survives_bad_timestamp() {
+    with_tmp_state(|| {
+        let p = Policy::from_json(POLICY).unwrap();
+        set_manual_pin("s-t", "a:x", "x@a");
+        let first = throttle_pin(&p, "x@a").unwrap();
+        // A second throttle must not extend the window (restore stays predictable).
+        assert_eq!(throttle_pin(&p, "x@a"), Some(first));
+        with_state(|st| st.breakers.insert("x@a".into(), i64::MAX as u64));
+        let s = selection_status("s-t", "b:y", "parent");
+        assert_eq!(s, "Throttled (a:x, resets ?) -> Fallback: b:y");
+    });
+}
