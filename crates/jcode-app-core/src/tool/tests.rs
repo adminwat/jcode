@@ -725,6 +725,7 @@ async fn tool_descriptions_stay_under_token_cap() {
         "todo",
         "applet",
         "codemode",
+        "macos_computer_use", // macOS-only: live-machine safety text, like `browser`
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -735,12 +736,12 @@ async fn tool_descriptions_stay_under_token_cap() {
         .into_iter()
         .filter(|def| !EXEMPT.contains(&def.name.as_str()))
         .filter(|def| def.description_token_estimate() > DESCRIPTION_TOKEN_CAP)
-        .map(|def| {
+        .map(|d| {
             format!(
-                "{} (~{} tokens): {}",
-                def.name,
-                def.description_token_estimate(),
-                def.description
+                "{} (~{}): {}",
+                d.name,
+                d.description_token_estimate(),
+                d.description
             )
         })
         .collect();
@@ -819,6 +820,7 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
             let tokens = crate::util::estimate_tokens(&description);
             if tokens > PARAM_DESCRIPTION_TOKEN_CAP
                 && !EXEMPT.contains(&(def.name.as_str(), path.as_str()))
+                && def.name != "macos_computer_use"
             {
                 over_cap.push(format!(
                     "{} {} (~{} tokens): {}",
@@ -1936,6 +1938,9 @@ mod mcp_collision;
 #[path = "tests/sdk.rs"]
 mod sdk_tests;
 
+#[path = "tests/post_tool_feedback.rs"]
+mod post_tool_feedback_tests;
+
 #[test]
 fn touched_paths_include_patch_headers_and_path_keys() {
     let ctx = mcp_test_context(std::path::Path::new("/work"));
@@ -1958,46 +1963,6 @@ fn touched_paths_include_patch_headers_and_path_keys() {
 
     let diff = "--- a/src/x.rs\n+++ b/src/x.rs\n@@ -1 +1 @@\n-a\n+b\n--- /dev/null\n+++ b/new.md\n";
     assert_eq!(Registry::patch_paths(diff), vec!["src/x.rs", "new.md"]);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
-    use std::os::unix::fs::PermissionsExt;
-    let _env_lock = crate::storage::lock_test_env();
-    let dir = tempfile::tempdir().expect("temp dir");
-    let target = dir.path().join("prose.md");
-    std::fs::write(&target, "hello\n").expect("write target");
-    let script = dir.path().join("feedback.sh");
-    std::fs::write(
-        &script,
-        "#!/bin/sh\ninput=$(cat)\necho \"call=$JCODE_HOOK_TOOL_CALL_ID tool=$JCODE_HOOK_TOOL_NAME\"\necho \"paths=$JCODE_HOOK_TOUCHED_PATHS\"\ncase \"$input\" in *prose.md*) echo stdin-ok ;; esac\nexit 1\n",
-    )
-    .expect("write script");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let previous = std::env::var_os("JCODE_HOOK_POST_TOOL_FEEDBACK");
-    crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
-
-    let registry = Registry::new(Arc::new(MockProvider) as Arc<dyn Provider>).await;
-    let mut ctx = mcp_test_context(dir.path());
-    ctx.tool_call_id = "call_feedback".to_string();
-    let result = registry
-        .execute("read", serde_json::json!({"file_path": "prose.md"}), ctx)
-        .await;
-
-    match previous {
-        Some(value) => crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", value),
-        None => crate::env::remove_var("JCODE_HOOK_POST_TOOL_FEEDBACK"),
-    }
-    let output = result.expect("read should succeed").output;
-    assert!(output.contains("hello"), "{output}");
-    assert!(output.contains("[post_tool_feedback]"), "{output}");
-    assert!(output.contains("call=call_feedback tool=read"), "{output}");
-    assert!(
-        output.contains(&format!("paths={}", target.display())),
-        "{output}"
-    );
-    assert!(output.contains("stdin-ok"), "{output}");
 }
 
 /// Dump every model-visible tool definition as JSON so a real tokenizer can

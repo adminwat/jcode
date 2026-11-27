@@ -857,6 +857,9 @@ mod tests {
     #[tokio::test]
     async fn debug_tool_selfdev_reload_returns_promptly_for_direct_execution() {
         let _env_lock = lock_env();
+        // Hermetic: the developer's own pre_tool gates must not veto the tool.
+        let _no_pre_tool = EnvGuard::set("JCODE_HOOK_PRE_TOOL", "");
+        crate::config::invalidate_config_cache();
         let _test_session = EnvGuard::set("JCODE_TEST_SESSION", "1");
         let _debug_control = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
 

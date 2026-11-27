@@ -544,7 +544,7 @@ pub(super) async fn spawn_swarm_agent(
             })
         }
     }?;
-
+    super::turn_failover::best_fit_router::bind_local_slot(req_session_id, &new_session_id);
     if is_headless_fallback && let Some(lane_id) = lane_id.as_deref() {
         let brief =
             super::swarm_todo_link::seed_spawn_lane(req_session_id, &new_session_id, lane_id)?;

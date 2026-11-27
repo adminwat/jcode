@@ -1785,14 +1785,14 @@ pub(super) async fn update_member_status_with_report_tldr(
             let report_back_to_session_id = member.report_back_to_session_id.clone();
             member.status = status.to_string();
             member.detail = detail;
-            // Clear any live output tail when the worker reaches a terminal or
-            // idle state so the inline gallery viewport doesn't keep showing
-            // stale in-progress text after the turn finishes.
+            // Terminal/idle: clear the stale live output tail and free any
+            // best-fit local slot the worker holds.
             if matches!(
                 status,
                 "ready" | "completed" | "done" | "failed" | "crashed" | "stopped"
             ) {
                 member.output_tail = None;
+                super::turn_failover::best_fit_router::release_local_slot(session_id);
             }
             if completion_report.is_some() {
                 member.latest_completion_report = completion_report.clone();

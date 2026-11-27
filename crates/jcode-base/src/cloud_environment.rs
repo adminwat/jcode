@@ -378,22 +378,35 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
     {
         use std::os::fd::{AsRawFd, FromRawFd};
         let (dir, name) = open_parent(base, relative, true)?;
-        let fd = unsafe {
-            libc::openat(
-                dir.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR
-                    | libc::O_CREAT
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC
-                    | libc::O_NONBLOCK,
-                0o600,
-            )
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // macOS can answer a contended O_CREAT in a just-created directory with
+        // ENOENT; retry it within the same bounded lock deadline.
+        let fd = loop {
+            let fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK,
+                    0o600,
+                )
+            };
+            let error = std::io::Error::last_os_error();
+            if fd >= 0 {
+                break fd;
+            }
+            ensure!(
+                error.kind() == std::io::ErrorKind::NotFound
+                    && std::time::Instant::now() < deadline,
+                "cannot lock private state: {error}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
         };
-        ensure!(fd >= 0, "cannot lock private state");
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         ensure!(file.metadata()?.is_file(), "invalid private lock");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 break;
@@ -404,7 +417,7 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
                     error.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                 ),
-                "cannot lock private state"
+                "cannot lock private state: {error}"
             );
             ensure!(
                 std::time::Instant::now() < deadline,
@@ -902,5 +915,24 @@ mod tests {
         lease.away_host = None;
         assert!(validate_lease(&lease, "id", "remote", now).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn contended_private_lock_creation_never_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let base = home.path().canonicalize().unwrap();
+    for round in 0..20 {
+        let rel = PathBuf::from(format!("cloud-environment-{round}/x.hydrate.lock"));
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|sc| {
+            for _ in 0..8 {
+                sc.spawn(|| {
+                    barrier.wait();
+                    lock_private(&base, &rel).unwrap();
+                });
+            }
+        });
     }
 }

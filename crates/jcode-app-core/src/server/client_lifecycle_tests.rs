@@ -1306,12 +1306,12 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         let message_count = agent.lock().await.message_count();
         let event_count = event_counter.load(std::sync::atomic::Ordering::Relaxed);
 
-        // A stale History continuation arriving after the final answer is a
-        // no-op even if it carries an invalid skill. No turn/skill/status edits.
+        // A stale reminder-only History continuation (content runs, e6d9cb47c)
+        // is a no-op even if it carries an invalid skill.
         start_processing_message(
             ProcessingMessage {
                 id: 78,
-                content: "continue after reload".to_string(),
+                content: String::new(),
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
                 active_skill: Some("nonexistent-replay-skill".to_string()),
