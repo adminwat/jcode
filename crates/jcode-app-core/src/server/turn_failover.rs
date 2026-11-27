@@ -159,17 +159,50 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
 /// Routed spec of the agent's current route.
 pub(super) fn current_spec(agent: &Agent) -> String {
     let model = agent.provider_model();
-    let method = agent.session_route_api_method().unwrap_or_default();
+    let method = agent.session_route_api_method();
     agent
         .model_routes()
         .iter()
-        .find(|r| r.model == model && (method.is_empty() || r.api_method == method))
+        .find(|r| {
+            r.model == model
+                && method
+                    .as_ref()
+                    .is_none_or(|m| m.is_empty() || &r.api_method == m)
+        })
         .map(|r| RouteSelection::from_model_route(r).routed_model_spec())
         .unwrap_or(model)
 }
 
+/// Client auto-switch veto: a live manual pin blocks it unless the limit error
+/// hit the pinned route itself, in which case its breaker opens and fallback is allowed.
+pub(super) fn manual_pin_veto(agent: &Agent, automatic: bool) -> Option<&'static str> {
+    let blocked = automatic
+        && best_fit_router::manual_pin(agent.session_id()).is_some_and(|(spec, route, until)| {
+            until.is_none()
+                && !(current_spec(agent) == spec
+                    && best_fit_router::Policy::load()
+                        .and_then(|p| best_fit_router::throttle_pin(&p, &route))
+                        .is_some())
+        });
+    blocked.then_some("a manual pin is active and its route is not throttled")
+}
+
+/// Apply a client route pick; a manual one (not automatic) becomes the session pin.
+pub(super) fn set_route_recording_pin(
+    agent: &mut Agent,
+    selection: &RouteSelection,
+    automatic: bool,
+) -> anyhow::Result<()> {
+    agent.set_route_selection(selection)?;
+    record_manual_pin(agent, selection, automatic);
+    Ok(())
+}
+
 /// Persist a user's manual route pick as the session pin.
-pub(super) fn record_manual_pin(agent: &Agent, selection: &RouteSelection) {
+pub(super) fn record_manual_pin(agent: &Agent, selection: &RouteSelection, automatic: bool) {
+    if automatic {
+        return;
+    }
     let spec = selection.routed_model_spec();
     let route = agent
         .model_routes()
@@ -201,13 +234,19 @@ pub(super) fn restore_manual_pin(agent: &mut Agent, event_tx: &mpsc::UnboundedSe
             }
         }
     }
-    let _ = event_tx.send(ServerEvent::StatusDetail {
-        detail: best_fit_router::selection_status(
-            agent.session_id(),
-            &current_spec(agent),
-            best_fit_router::PARENT_TIER,
-        ),
-    });
+    // Status line is advisory; a closed client channel just drops it.
+    if event_tx
+        .send(ServerEvent::StatusDetail {
+            detail: best_fit_router::selection_status(
+                agent.session_id(),
+                &current_spec(agent),
+                best_fit_router::PARENT_TIER,
+            ),
+        })
+        .is_err()
+    {
+        crate::logging::warn("selection status: client channel closed");
+    }
 }
 
 /// Apply `target` to the agent and tell every attached client.

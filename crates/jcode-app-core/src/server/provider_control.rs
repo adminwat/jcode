@@ -425,21 +425,8 @@ fn apply_set_route(
 
     let current = agent.provider_model();
     let result = {
-        let pin = super::turn_failover::best_fit_router::manual_pin(agent.session_id());
         let ineligible = if !automatic_failover {
             None
-        } else if pin.as_ref().is_some_and(|(spec, route, until)| {
-            // The client only auto-switches on a limit error: when that error
-            // hit the pinned route, open its breaker so the fallback is allowed.
-            until.is_none()
-                && !(super::turn_failover::current_spec(agent) == *spec
-                    && super::turn_failover::best_fit_router::Policy::load()
-                        .and_then(|p| {
-                            super::turn_failover::best_fit_router::throttle_pin(&p, route)
-                        })
-                        .is_some())
-        }) {
-            Some("a manual pin is active and its route is not throttled")
         } else if crate::config::Config::load()
             .provider
             .cross_provider_failover
@@ -453,18 +440,15 @@ fn apply_set_route(
         ) {
             Some("target account is not eligible in the auto-switch group")
         } else {
-            None
+            super::turn_failover::manual_pin_veto(agent, automatic_failover)
         };
         let result = if let Some(why) = ineligible {
             Err(anyhow::anyhow!("Auto-switch canceled: {why}."))
         } else {
-            agent.set_route_selection(&selection)
+            super::turn_failover::set_route_recording_pin(agent, &selection, automatic_failover)
         };
         if result.is_ok() {
             agent.reset_provider_session();
-            if !automatic_failover {
-                super::turn_failover::record_manual_pin(agent, &selection);
-            }
         }
         result.map(|_| {
             (
