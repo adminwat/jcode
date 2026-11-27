@@ -520,6 +520,59 @@ pub(crate) struct SharedState {
     /// session id -> metered tokens dispatched
     #[serde(default)]
     pub metered_tokens: HashMap<String, u64>,
+    /// session id -> (routed model spec, route id) the user picked by hand.
+    /// Wins over automatic routing and tier classification until its route's
+    /// breaker opens; restored automatically once that cooldown expires.
+    #[serde(default)]
+    pub manual_pins: HashMap<String, (String, String)>,
+}
+
+/// Record a manual pick for `session_id`.
+pub(crate) fn set_manual_pin(session_id: &str, spec: &str, route: &str) {
+    with_state(|st| {
+        st.manual_pins.insert(
+            session_id.to_string(),
+            (spec.to_string(), route.to_string()),
+        )
+    });
+}
+
+/// `(spec, route id, breaker cooldown_until)` of the session's manual pin.
+pub(crate) fn manual_pin(session_id: &str) -> Option<(String, String, Option<u64>)> {
+    with_state(|st| {
+        st.manual_pins
+            .get(session_id)
+            .map(|(s, r)| (s.clone(), r.clone(), st.breakers.get(r).copied()))
+    })
+    .flatten()
+}
+
+/// Open the pinned route's breaker so an explicit throttle can fall back.
+pub(crate) fn throttle_pin(policy: &Policy, route: &str) -> Option<u64> {
+    let until = now_s()
+        + policy
+            .num("/invariants/circuit_breaker/cooldown_s")
+            .unwrap_or(120);
+    with_state(|st| *st.breakers.entry(route.to_string()).or_insert(until))
+}
+
+/// Status text: `Pinned: X`, `Auto (<tier>): X`, or
+/// `Throttled (X, resets HH:MM:SS) -> Fallback: Y`.
+pub(crate) fn selection_status(session_id: &str, current: &str, tier: &str) -> String {
+    match manual_pin(session_id) {
+        Some((spec, _, Some(until))) if spec != current => {
+            let at = chrono::DateTime::from_timestamp(until as i64, 0)
+                .map(|t| {
+                    t.with_timezone(&chrono::Local)
+                        .format("%H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_default();
+            format!("Throttled ({spec}, resets {at}) -> Fallback: {current}")
+        }
+        Some((spec, _, _)) if spec == current => format!("Pinned: {current}"),
+        _ => format!("Auto ({tier}): {current}"),
+    }
 }
 
 fn now_s() -> u64 {
@@ -765,6 +818,21 @@ pub(crate) fn dispatch(
     let approved = approved_profiles();
     let max_local = policy.max_local();
     let mut claimed = None;
+    // A live manual pin beats tier classification for this session.
+    if let Some((_, pin, None)) = manual_pin(session_id)
+        && let Some(r) = routes.iter().find(|r| route_id(r) == pin)
+    {
+        let billing = policy.classify(r, &approved);
+        return Some(Dispatch {
+            route: r.clone(),
+            billing,
+            tier: PARENT_TIER,
+            requested_tier,
+            sticky: true,
+            over_budget: false,
+            payload_tokens,
+        });
+    }
     let out = with_state(|st| {
         let spent = st.metered_tokens.get(session_id).copied().unwrap_or(0);
         let over_budget = policy
