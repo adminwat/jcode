@@ -8,6 +8,7 @@ use tokio::time::{Duration, timeout};
 
 struct IsolatedRuntimeDir {
     _prev_runtime: Option<std::ffi::OsString>,
+    _prev_home: Option<std::ffi::OsString>,
     _temp: tempfile::TempDir,
 }
 
@@ -16,8 +17,14 @@ impl IsolatedRuntimeDir {
         let temp = tempfile::TempDir::new().expect("runtime dir");
         let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
         crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+        // Router-state (manual pins, triggers) lives under JCODE_HOME; keep test
+        // sessions out of the operator's real ~/.jcode/state/router-state.json.
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::config::Config::invalidate_cache();
         Self {
             _prev_runtime: prev_runtime,
+            _prev_home: prev_home,
             _temp: temp,
         }
     }
@@ -30,6 +37,12 @@ impl Drop for IsolatedRuntimeDir {
         } else {
             crate::env::remove_var("JCODE_RUNTIME_DIR");
         }
+        if let Some(prev_home) = self._prev_home.take() {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+        crate::config::Config::invalidate_cache();
     }
 }
 
