@@ -938,6 +938,10 @@ impl crate::tui::TuiState for App {
         self.status_detail.clone()
     }
 
+    fn route_selection_status(&self) -> Option<String> {
+        self.route_selection_status.clone()
+    }
+
     fn mcp_servers(&self) -> Vec<(String, usize)> {
         self.mcp_server_names.clone()
     }

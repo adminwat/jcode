@@ -404,11 +404,19 @@ pub(crate) fn local_probe(route: &ModelRoute) -> bool {
 }
 
 type PinKey = (String, String);
-/// (pinned route id, routes excluded after step-down)
-type PinState = (String, HashSet<String>);
+/// (pinned route id, route id -> unix s until which it stays excluded after step-down)
+type PinState = (String, HashMap<String, u64>);
 fn pins() -> &'static Mutex<HashMap<PinKey, PinState>> {
     static PINS: OnceLock<Mutex<HashMap<PinKey, PinState>>> = OnceLock::new();
     PINS.get_or_init(Default::default)
+}
+
+/// Live (unexpired) step-down exclusions for a session/tier. Dropping expired
+/// entries here is what lets a route stepped down for one 429 come back.
+fn live_exclusions(entry: &mut PinState) -> HashSet<String> {
+    let now = now_s();
+    entry.1.retain(|_, until| *until > now);
+    entry.1.keys().cloned().collect()
 }
 
 /// Sticky best-fit pick: reuse the session's pinned route for this tier while it
@@ -429,8 +437,9 @@ pub(crate) fn pick(
     };
     let entry = map
         .entry(key)
-        .or_insert_with(|| (String::new(), HashSet::new()));
-    let ranked = policy.rank(tier, routes, &approved, 0, &entry.1, probe);
+        .or_insert_with(|| (String::new(), HashMap::new()));
+    let excluded = live_exclusions(entry);
+    let ranked = policy.rank(tier, routes, &approved, 0, &excluded, probe);
     if let Some((r, b)) = ranked.iter().find(|(r, _)| route_id(r) == entry.0) {
         return Some(((*r).clone(), *b, true));
     }
@@ -459,11 +468,12 @@ pub(crate) fn step_down(policy: &Policy, session_id: &str, tier: &str, reason: &
         .pointer("/stickiness/max_step_downs")
         .and_then(Value::as_u64)
         .unwrap_or(3);
-    if entry.1.len() as u64 >= max || entry.0.is_empty() {
+    if live_exclusions(entry).len() as u64 >= max || entry.0.is_empty() {
         return false;
     }
     let failed = std::mem::take(&mut entry.0);
-    entry.1.insert(failed);
+    let ttl = policy.num("/stickiness/exclusion_ttl_s").unwrap_or(600);
+    entry.1.insert(failed, now_s() + ttl);
     true
 }
 
@@ -525,6 +535,38 @@ pub(crate) struct SharedState {
     /// breaker opens; restored automatically once that cooldown expires.
     #[serde(default)]
     pub manual_pins: HashMap<String, (String, String)>,
+    /// route id -> (consecutive trips, unix s of the last trip) for exponential
+    /// backoff; an entry older than the backoff window resets to one trip.
+    #[serde(default)]
+    pub trips: HashMap<String, (u32, u64)>,
+    /// session id -> (trigger, routed model spec, unix s) of the last switch.
+    /// Every model change records one of `manual_pin`, `tier_route`,
+    /// `rate_limit_429`, `cooldown_recovered`: no switch is silent.
+    #[serde(default)]
+    pub last_trigger: HashMap<String, (String, String, u64)>,
+}
+
+/// Record why `session_id` is now on `spec`, in shared state and telemetry.
+pub(crate) fn record_trigger(session_id: &str, trigger: &str, spec: &str) {
+    with_state(|st| {
+        st.last_trigger.insert(
+            session_id.to_string(),
+            (trigger.to_string(), spec.to_string(), now_s()),
+        )
+    });
+    telemetry(serde_json::json!({
+        "event": "model_switch", "session_id": session_id, "trigger": trigger, "route": spec,
+    }));
+}
+
+/// `(trigger, spec)` of the session's last recorded switch.
+pub(crate) fn last_trigger(session_id: &str) -> Option<(String, String)> {
+    with_state(|st| {
+        st.last_trigger
+            .get(session_id)
+            .map(|(t, s, _)| (t.clone(), s.clone()))
+    })
+    .flatten()
 }
 
 /// Record a manual pick for `session_id`.
@@ -549,11 +591,38 @@ pub(crate) fn manual_pin(session_id: &str) -> Option<(String, String, Option<u64
 
 /// Open the pinned route's breaker so an explicit throttle can fall back.
 pub(crate) fn throttle_pin(policy: &Policy, route: &str) -> Option<u64> {
-    let until = now_s()
-        + policy
-            .num("/invariants/circuit_breaker/cooldown_s")
-            .unwrap_or(120);
-    with_state(|st| *st.breakers.entry(route.to_string()).or_insert(until))
+    with_state(|st| match st.breakers.get(route) {
+        Some(until) => *until,
+        None => open_breaker(policy, st, route),
+    })
+}
+
+/// Open `route`'s breaker with exponential backoff: the nth consecutive trip
+/// inside `backoff.max_cooldown_s` waits `cooldown_s * factor^(n-1)`, capped.
+fn open_breaker(policy: &Policy, st: &mut SharedState, route: &str) -> u64 {
+    let now = now_s();
+    let base = policy
+        .num("/invariants/circuit_breaker/cooldown_s")
+        .unwrap_or(120);
+    let factor = policy
+        .num("/invariants/circuit_breaker/backoff/factor")
+        .unwrap_or(1)
+        .max(1);
+    let cap = policy
+        .num("/invariants/circuit_breaker/backoff/max_cooldown_s")
+        .unwrap_or(base)
+        .max(base);
+    let n = match st.trips.get(route) {
+        Some((n, last)) if now.saturating_sub(*last) <= cap => n + 1,
+        _ => 1,
+    };
+    st.trips.insert(route.to_string(), (n, now));
+    let cooldown = base
+        .saturating_mul(factor.saturating_pow(n.saturating_sub(1)))
+        .min(cap);
+    let until = now + cooldown;
+    st.breakers.insert(route.to_string(), until);
+    until
 }
 
 /// Status text: `Pinned: X`, `Auto (<tier>): X`, or
@@ -669,11 +738,7 @@ impl Policy {
         {
             return false;
         }
-        let until = now_s()
-            + self
-                .num("/invariants/circuit_breaker/cooldown_s")
-                .unwrap_or(120);
-        with_state(|st| st.breakers.insert(route.to_string(), until)).is_some()
+        with_state(|st| open_breaker(self, st, route)).is_some()
     }
 
     fn max_local(&self) -> usize {
@@ -844,10 +909,10 @@ pub(crate) fn dispatch(
         let mut tier = requested_tier;
         loop {
             let mut excluded = open.clone();
-            if let Ok(map) = pins().lock()
-                && let Some((_, ex)) = map.get(&(session_id.to_string(), tier.to_string()))
+            if let Ok(mut map) = pins().lock()
+                && let Some(entry) = map.get_mut(&(session_id.to_string(), tier.to_string()))
             {
-                excluded.extend(ex.iter().cloned());
+                excluded.extend(live_exclusions(entry));
             }
             let ranked = policy.rank(tier, routes, &approved, payload_tokens, &excluded, probe);
             let pinned = match pins().lock() {
@@ -871,7 +936,7 @@ pub(crate) fn dispatch(
             if let Some(((r, b), sticky)) = pick {
                 if let Ok(mut m) = pins().lock() {
                     m.entry((session_id.to_string(), tier.to_string()))
-                        .or_insert_with(|| (String::new(), HashSet::new()))
+                        .or_insert_with(|| (String::new(), HashMap::new()))
                         .0 = route_id(r);
                 }
                 if b == Billing::Local {

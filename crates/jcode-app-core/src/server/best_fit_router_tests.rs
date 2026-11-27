@@ -521,3 +521,169 @@ fn throttle_pin_keeps_existing_cooldown_and_status_survives_bad_timestamp() {
         assert_eq!(s, "Throttled (a:x, resets ?) -> Fallback: b:y");
     });
 }
+
+#[test]
+fn manual_pin_survives_tier_reclassification_and_records_triggers() {
+    with_tmp_state(|| {
+        let p = Policy::from_json(POLICY).unwrap();
+        let r = vec![
+            ctx_route("big", "x-oauth@a", "context ~200000 tokens", 50),
+            ctx_route("small", "x-oauth@a", "context ~200000 tokens", 5),
+        ];
+        set_manual_pin("s-tier", "a:small", "small@x-oauth@a");
+        record_trigger("s-tier", "manual_pin", "a:small");
+        // code_execution and deep_architecture prompts both land on the pin.
+        for prompt in [
+            "implement the parser and add tests",
+            "design the architecture",
+        ] {
+            let d = dispatch(&p, "s-tier", prompt, &r, &|_| true, std::process::id()).unwrap();
+            assert_eq!(
+                (d.route.model.as_str(), d.sticky),
+                ("small", true),
+                "{prompt}"
+            );
+        }
+        assert_eq!(
+            last_trigger("s-tier"),
+            Some(("manual_pin".into(), "a:small".into()))
+        );
+        // Throttle: the breaker opens, the pin yields to ranking, the trigger is recorded.
+        let until = throttle_pin(&p, "small@x-oauth@a").unwrap();
+        assert!(until >= now_s() + 119 && until <= now_s() + 121);
+        let d = dispatch(
+            &p,
+            "s-tier",
+            "implement x",
+            &r,
+            &|_| true,
+            std::process::id(),
+        )
+        .unwrap();
+        assert_eq!(d.route.model, "big");
+        record_trigger("s-tier", "rate_limit_429", "a:big");
+        assert_eq!(last_trigger("s-tier").unwrap().0, "rate_limit_429");
+        // Cooldown expiry restores the pin on the next dispatch.
+        with_state(|st| st.breakers.insert("small@x-oauth@a".into(), 1));
+        let d = dispatch(
+            &p,
+            "s-tier",
+            "implement x",
+            &r,
+            &|_| true,
+            std::process::id(),
+        )
+        .unwrap();
+        assert_eq!(d.route.model, "small");
+        record_trigger("s-tier", "cooldown_recovered", "a:small");
+        assert_eq!(last_trigger("s-tier").unwrap().0, "cooldown_recovered");
+        let rows = with_state(|st| st.last_trigger.len()).unwrap();
+        assert_eq!(rows, 1, "one row per session, overwritten on each switch");
+    });
+}
+
+#[test]
+fn step_down_exclusion_expires_after_ttl() {
+    let p = Policy::from_json(POLICY).unwrap();
+    let r = routes();
+    let (a, _, _) = pick(&p, "s-ttl", PARENT_TIER, &r, &|_| true).unwrap();
+    assert_eq!(a.model, "m-oauth-big");
+    assert!(step_down(&p, "s-ttl", PARENT_TIER, "429"));
+    let (b, _, _) = pick(&p, "s-ttl", PARENT_TIER, &r, &|_| true).unwrap();
+    assert_eq!(b.model, "m-oauth-small");
+    // Expire the exclusion: the stepped-down route is eligible again.
+    {
+        let mut m = pins().lock().unwrap();
+        let e = m
+            .get_mut(&("s-ttl".to_string(), PARENT_TIER.to_string()))
+            .unwrap();
+        for v in e.1.values_mut() {
+            *v = 1;
+        }
+        e.0.clear();
+    }
+    let (c, _, _) = pick(&p, "s-ttl", PARENT_TIER, &r, &|_| true).unwrap();
+    assert_eq!(c.model, "m-oauth-big");
+}
+
+#[test]
+fn breaker_backoff_doubles_and_caps() {
+    with_tmp_state(|| {
+        let p = Policy::from_json(POLICY).unwrap();
+        let t0 = now_s();
+        assert!(p.trip("r@x", "429"));
+        let u1 = with_state(|s| s.breakers["r@x"]).unwrap();
+        assert!((119..=121).contains(&(u1 - t0)), "first trip: cooldown_s");
+        with_state(|s| s.breakers.remove("r@x"));
+        assert!(p.trip("r@x", "429"));
+        let u2 = with_state(|s| s.breakers["r@x"]).unwrap();
+        assert!(
+            (239..=241).contains(&(u2 - t0)),
+            "second trip: x2, got {}",
+            u2 - t0
+        );
+        for _ in 0..6 {
+            with_state(|s| s.breakers.remove("r@x"));
+            assert!(p.trip("r@x", "429"));
+        }
+        let un = with_state(|s| s.breakers["r@x"]).unwrap();
+        assert!(
+            (1799..=1801).contains(&(un - t0)),
+            "capped at max_cooldown_s, got {}",
+            un - t0
+        );
+        // A trip older than the window resets the count.
+        with_state(|s| {
+            s.breakers.remove("r@x");
+            s.trips.insert("r@x".into(), (8, t0 - 5000));
+        });
+        assert!(p.trip("r@x", "429"));
+        let ur = with_state(|s| s.breakers["r@x"]).unwrap();
+        assert!(
+            (119..=121).contains(&(ur - now_s())),
+            "reset to base, got {}",
+            ur - now_s()
+        );
+        // throttle_pin never shortens an already-open breaker.
+        assert_eq!(throttle_pin(&p, "r@x"), Some(ur));
+    });
+}
+
+#[test]
+fn concurrent_writers_keep_every_pin_and_breaker() {
+    with_tmp_state(|| {
+        let p = Policy::from_json(POLICY).unwrap();
+        let path = state_path().unwrap();
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let p = Policy::from_json(POLICY).unwrap();
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    // Each thread re-reads the env-pinned path through state_path().
+                    assert_eq!(state_path().unwrap(), path);
+                    for j in 0..25 {
+                        set_manual_pin(&format!("s{i}-{j}"), "a:x", &format!("x{i}@a"));
+                        p.trip(&format!("x{i}-{j}@a"), "429");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let (pins, breakers) = with_state(|st| (st.manual_pins.len(), st.breakers.len())).unwrap();
+        assert_eq!(
+            (pins, breakers),
+            (200, 200),
+            "no lost writes under contention"
+        );
+        // The file on disk is well-formed JSON (atomic tmp+rename).
+        let text = std::fs::read_to_string(&path).unwrap();
+        let st: SharedState = serde_json::from_str(&text).unwrap();
+        assert_eq!(st.manual_pins.len(), 200);
+        // One session's 429 never evicts another session's pin.
+        assert!(p.trip("x0@a", "429"));
+        assert_eq!(manual_pin("s1-0").unwrap().2, None);
+        assert!(manual_pin("s0-0").unwrap().2.is_some());
+    });
+}

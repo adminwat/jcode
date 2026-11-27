@@ -72,11 +72,14 @@ fn model_is_placeholder(model: &str) -> bool {
         || trimmed.starts_with("connecting")
 }
 
-/// Shared live/preview model chrome. Measure terminal cells, not scalar values.
+/// Shared live/preview model chrome, plus the router's `Pinned:` / `Auto (<tier>):` /
+/// `Throttled (...) -> Fallback:` line so a user always sees why this model. Measure
+/// terminal cells, not scalar values.
 fn model_header_line(
     nice_model: &str,
     provider_label: &str,
     upstream: Option<&str>,
+    selection: Option<&str>,
     width: usize,
     placeholder: bool,
 ) -> Line<'static> {
@@ -102,7 +105,19 @@ fn model_header_line(
     if let Some(upstream) = upstream.filter(|_| !placeholder) {
         let suffix = format!(" via {upstream}");
         if used + suffix.width() <= budget {
+            used += suffix.width();
             spans.push(Span::styled(suffix, Style::default().fg(dim_color())));
+        }
+    }
+    if let Some(selection) = selection.filter(|s| !placeholder && !s.trim().is_empty()) {
+        let suffix = format!(" · {}", selection.trim());
+        if used + suffix.width() <= budget {
+            let color = if selection.starts_with("Throttled") {
+                rgb(255, 200, 100)
+            } else {
+                dim_color()
+            };
+            spans.push(Span::styled(suffix, Style::default().fg(color)));
         }
     }
     Line::from(spans).alignment(Alignment::Left)
@@ -157,6 +172,7 @@ pub(crate) fn build_preview_header(
         lines.push(model_header_line(
             &nice_model,
             session.provider_key.as_deref().unwrap_or(""),
+            None,
             None,
             width as usize,
             model_is_placeholder(model),
@@ -840,10 +856,12 @@ fn build_persistent_header_with_auth(
         app.upstream_provider()
     };
     if !nice_model.is_empty() {
+        let selection = app.route_selection_status();
         lines.push(model_header_line(
             &nice_model,
             &provider_label,
             upstream.as_deref(),
+            selection.as_deref(),
             w,
             model_is_placeholder,
         ));

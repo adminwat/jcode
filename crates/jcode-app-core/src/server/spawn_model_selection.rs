@@ -362,7 +362,10 @@ pub(super) async fn best_fit_swarm_model(
     }));
     let route = picked?.route;
     match resolve_registry_model(&bf::route_id(&route), std::slice::from_ref(&route)) {
-        Ok(model) => Some(model),
+        Ok(model) => {
+            bf::record_trigger(req_session_id, "tier_route", &model);
+            Some(model)
+        }
         Err(e) => {
             crate::logging::warn(&format!("best-fit pick not spawnable: {e}"));
             None

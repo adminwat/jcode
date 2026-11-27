@@ -44,6 +44,7 @@ impl App {
         self.session.provider_session_id = None;
         self.upstream_provider = None;
         self.status_detail = None;
+        self.route_selection_status = None;
         self.invalidate_model_picker_cache();
         let active_model = self.provider.model();
         self.update_context_limit_for_model(&active_model, None);

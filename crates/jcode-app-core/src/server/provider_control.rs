@@ -314,7 +314,7 @@ fn apply_set_model(
 
     let current = agent.provider_model();
     let result = {
-        let result = agent.set_model(&model);
+        let result = super::turn_failover::set_model_recording_pin(agent, &model);
         if result.is_ok() {
             agent.reset_provider_session();
         }
