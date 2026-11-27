@@ -169,10 +169,17 @@ fn with_tmp_state<T>(f: impl FnOnce() -> T) -> T {
     static L: Mutex<()> = Mutex::new(());
     let _g = L.lock().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("bfr-{}-{:?}", std::process::id(), Instant::now()));
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(dir.join("logs")).unwrap();
+    // JCODE_HOME too: telemetry() writes `<jcode_dir>/logs/hook-telemetry.jsonl`.
+    let prev_home = std::env::var_os("JCODE_HOME");
     unsafe { std::env::set_var("JCODE_ROUTER_STATE", dir.join("router-state.json")) };
+    unsafe { std::env::set_var("JCODE_HOME", &dir) };
     let out = f();
     unsafe { std::env::remove_var("JCODE_ROUTER_STATE") };
+    match prev_home {
+        Some(v) => unsafe { std::env::set_var("JCODE_HOME", v) },
+        None => unsafe { std::env::remove_var("JCODE_HOME") },
+    }
     let _ = std::fs::remove_dir_all(dir);
     out
 }
@@ -685,5 +692,17 @@ fn concurrent_writers_keep_every_pin_and_breaker() {
         assert!(p.trip("x0@a", "429"));
         assert_eq!(manual_pin("s1-0").unwrap().2, None);
         assert!(manual_pin("s0-0").unwrap().2.is_some());
+    });
+}
+
+#[test]
+fn state_path_and_telemetry_follow_jcode_home_when_no_override() {
+    with_tmp_state(|| {
+        unsafe { std::env::remove_var("JCODE_ROUTER_STATE") };
+        let home = std::path::PathBuf::from(std::env::var_os("JCODE_HOME").unwrap());
+        assert_eq!(state_path().unwrap(), home.join("state/router-state.json"));
+        telemetry(serde_json::json!({"event": "probe"}));
+        let rows = std::fs::read_to_string(home.join("logs/hook-telemetry.jsonl")).unwrap();
+        assert!(rows.contains("\"event\":\"probe\""), "{rows}");
     });
 }

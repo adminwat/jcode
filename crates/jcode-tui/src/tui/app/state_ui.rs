@@ -1470,12 +1470,10 @@ fn format_cache_stats(app: &App) -> String {
         opt_string(app.upstream_provider.as_deref())
     ));
     lines.push(format!(
-        "- connection_type: {}",
-        opt_string(app.connection_type.as_deref())
-    ));
-    lines.push(format!(
-        "- status_detail: {}",
-        opt_string(app.status_detail.as_deref())
+        "- connection_type: {} · status_detail: {} · route: {}",
+        opt_string(app.connection_type.as_deref()),
+        opt_string(app.status_detail.as_deref()),
+        opt_string(app.route_selection_status.as_deref())
     ));
     lines.push(String::new());
 

@@ -495,7 +495,9 @@ pub(crate) fn step_down_reason(err: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn telemetry(event: Value) {
-    let Some(path) = dirs::home_dir().map(|h| h.join(".jcode/logs/hook-telemetry.jsonl")) else {
+    // Same JCODE_HOME rule as state_path: fixture sessions must not write
+    // model_switch rows into the operator's live hook-telemetry.jsonl.
+    let Ok(path) = crate::storage::jcode_dir().map(|h| h.join("logs/hook-telemetry.jsonl")) else {
         return;
     };
     let mut row = serde_json::json!({
@@ -664,10 +666,20 @@ fn pid_alive(_pid: u32) -> bool {
     true
 }
 
+/// `JCODE_ROUTER_STATE` wins, then `<jcode_dir>/state/router-state.json` where
+/// `jcode_dir` honors `JCODE_HOME`, so a sandboxed test home never leaks pins
+/// into the operator's real `~/.jcode` (measured 2026-11-27: three fixture
+/// sessions in the live file).
 pub(crate) fn state_path() -> Option<std::path::PathBuf> {
     match std::env::var("JCODE_ROUTER_STATE") {
         Ok(p) if !p.is_empty() => Some(p.into()),
-        _ => dirs::home_dir().map(|h| h.join(".jcode/state/router-state.json")),
+        _ => match crate::storage::jcode_dir() {
+            Ok(h) => Some(h.join("state/router-state.json")),
+            Err(e) => {
+                crate::logging::warn(&format!("router-state: no jcode dir: {e}"));
+                None
+            }
+        },
     }
 }
 
