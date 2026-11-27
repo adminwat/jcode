@@ -109,6 +109,14 @@ impl App {
     /// even after another detail has replaced the status label.
     pub(super) fn apply_status_detail(&mut self, detail: String) {
         const OVERLOAD_PREFIX: &str = "OpenAI reported server overload";
+        // The router's selection line is state, not a transient transport label.
+        if detail.starts_with("Pinned: ")
+            || detail.starts_with("Auto (")
+            || detail.starts_with("Throttled (")
+        {
+            self.route_selection_status = Some(detail);
+            return;
+        }
         if detail.starts_with(OVERLOAD_PREFIX)
             && !self
                 .display_messages

@@ -115,6 +115,7 @@
   },
   "stickiness": {
     "pin": "per_session_per_tier",
+    "exclusion_ttl_s": 600,
     "step_down_on": [
       "429",
       "cap_exhausted",
@@ -178,7 +179,11 @@
         "429",
         "timeout"
       ],
-      "cooldown_s": 120
+      "cooldown_s": 120,
+      "backoff": {
+        "factor": 2,
+        "max_cooldown_s": 1800
+      }
     },
     "catalog": {
       "list_models_ttl_s": 60

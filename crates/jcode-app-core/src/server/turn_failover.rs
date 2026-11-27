@@ -198,9 +198,15 @@ pub(super) fn set_route_recording_pin(
     Ok(())
 }
 
-/// Persist a user's manual route pick as the session pin.
+/// Persist a user's manual route pick as the session pin; an automatic
+/// (client-driven limit) switch records its trigger instead.
 pub(super) fn record_manual_pin(agent: &Agent, selection: &RouteSelection, automatic: bool) {
     if automatic {
+        best_fit_router::record_trigger(
+            agent.session_id(),
+            "rate_limit_429",
+            &selection.routed_model_spec(),
+        );
         return;
     }
     let spec = selection.routed_model_spec();
@@ -211,6 +217,24 @@ pub(super) fn record_manual_pin(agent: &Agent, selection: &RouteSelection, autom
         .map(best_fit_router::route_id)
         .unwrap_or_else(|| format!("{}@{}", selection.model, selection.api_method));
     best_fit_router::set_manual_pin(agent.session_id(), &spec, &route);
+    best_fit_router::record_trigger(agent.session_id(), "manual_pin", &spec);
+}
+
+/// Apply a bare `/model <name>` pick and persist it as the session pin:
+/// SetModel only ever comes from the picker or `/model`, an explicit choice.
+pub(super) fn set_model_recording_pin(agent: &mut Agent, model: &str) -> anyhow::Result<()> {
+    agent.set_model(model)?;
+    let spec = current_spec(agent);
+    let model = agent.provider_model();
+    let route = agent
+        .model_routes()
+        .iter()
+        .find(|r| r.model == model)
+        .map(best_fit_router::route_id)
+        .unwrap_or_else(|| spec.clone());
+    best_fit_router::set_manual_pin(agent.session_id(), &spec, &route);
+    best_fit_router::record_trigger(agent.session_id(), "manual_pin", &spec);
+    Ok(())
 }
 
 /// At turn entry: once a throttled pin's cooldown has expired, switch back to
@@ -229,22 +253,27 @@ pub(super) fn restore_manual_pin(agent: &mut Agent, event_tx: &mpsc::UnboundedSe
                 label: describe_route(&route),
                 spec: spec.clone(),
             };
-            if let Err(e) = apply_failover_target(agent, &target, event_tx) {
-                crate::logging::warn(&format!("manual pin restore to {spec} failed: {e}"));
+            match apply_failover_target(agent, &target, event_tx) {
+                Ok(()) => {
+                    best_fit_router::record_trigger(agent.session_id(), "cooldown_recovered", &spec)
+                }
+                Err(e) => {
+                    crate::logging::warn(&format!("manual pin restore to {spec} failed: {e}"))
+                }
             }
         }
     }
-    // Status line is advisory; a closed client channel just drops it.
-    if event_tx
-        .send(ServerEvent::StatusDetail {
-            detail: best_fit_router::selection_status(
-                agent.session_id(),
-                &current_spec(agent),
-                best_fit_router::PARENT_TIER,
-            ),
-        })
-        .is_err()
-    {
+    // Status line is advisory; a closed client channel just drops it. It carries the
+    // recorded trigger so no switch is ever silent: `... [via rate_limit_429]`.
+    let mut detail = best_fit_router::selection_status(
+        agent.session_id(),
+        &current_spec(agent),
+        best_fit_router::PARENT_TIER,
+    );
+    if let Some((trigger, _)) = best_fit_router::last_trigger(agent.session_id()) {
+        detail.push_str(&format!(" [via {trigger}]"));
+    }
+    if event_tx.send(ServerEvent::StatusDetail { detail }).is_err() {
         crate::logging::warn("selection status: client channel closed");
     }
 }
@@ -452,6 +481,7 @@ pub(super) async fn retry_turn_with_server_failover(
             ));
             break;
         }
+        best_fit_router::record_trigger(agent.session_id(), "rate_limit_429", &target.spec);
         attempts += 1;
         result = agent
             .continue_turn_after_failover(

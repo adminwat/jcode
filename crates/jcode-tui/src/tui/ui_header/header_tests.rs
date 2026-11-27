@@ -723,3 +723,50 @@ fn format_model_name_labels_slashed_models_with_active_provider() {
         "Claude Opus"
     );
 }
+
+#[test]
+fn model_row_shows_route_selection_status() {
+    let text = |line: &Line<'static>| {
+        line.spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect::<String>()
+    };
+    let pinned = model_header_line(
+        "opus",
+        "claude",
+        None,
+        Some("Pinned: claude-oauth:opus"),
+        120,
+        false,
+    );
+    assert!(
+        text(&pinned).ends_with(" · Pinned: claude-oauth:opus"),
+        "{}",
+        text(&pinned)
+    );
+    let throttled = model_header_line(
+        "sonnet",
+        "claude",
+        None,
+        Some("Throttled (claude-oauth:opus, resets 21:30:00) -> Fallback: claude-oauth:sonnet"),
+        160,
+        false,
+    );
+    let t = text(&throttled);
+    assert!(
+        t.contains("Throttled (") && t.contains("-> Fallback:"),
+        "{t}"
+    );
+    assert_eq!(
+        throttled.spans.last().unwrap().style.fg,
+        Some(rgb(255, 200, 100)),
+        "throttle is highlighted, not dim"
+    );
+    // Too narrow: the selection is dropped, never truncated mid-word.
+    let narrow = model_header_line("opus", "claude", None, Some("Pinned: x"), 24, false);
+    assert!(!text(&narrow).contains("Pinned"), "{}", text(&narrow));
+    // Placeholder model rows never carry a selection.
+    let ph = model_header_line("connecting…", "", None, Some("Pinned: x"), 120, true);
+    assert!(!text(&ph).contains("Pinned"));
+}

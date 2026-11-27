@@ -823,6 +823,10 @@ pub trait TuiState {
     fn connection_type(&self) -> Option<String>;
     /// Provider-supplied human-readable status detail for the current stream.
     fn status_detail(&self) -> Option<String>;
+    /// Server's `Pinned: X` / `Auto (<tier>): X` / `Throttled (...) -> Fallback: Y` line.
+    fn route_selection_status(&self) -> Option<String> {
+        None
+    }
     fn mcp_servers(&self) -> Vec<(String, usize)>;
     fn available_skills(&self) -> Vec<String>;
     /// Authoritative active credential (OAuth vs API key) for a dual-auth

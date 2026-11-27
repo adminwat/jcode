@@ -990,6 +990,7 @@ pub struct App {
     connection_type: Option<String>,
     // Provider-supplied human-readable transport detail for the current stream
     status_detail: Option<String>,
+    route_selection_status: Option<String>, // server's Pinned/Auto/Throttled line
     // Session-wide token + cache accounting (accumulated across all turns).
     token_accounting: TokenAccounting,
     // KV cache baseline tracking + per-turn miss attribution.
