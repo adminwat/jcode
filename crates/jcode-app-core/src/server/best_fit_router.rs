@@ -41,6 +41,37 @@ impl Billing {
     }
 }
 
+/// Built-in read-only phrases, used when the policy lists none.
+const DEFAULT_READ_ONLY_MARKERS: [&str; 9] = [
+    "do not edit",
+    "don't edit",
+    "do not modify",
+    "don't modify",
+    "do not write",
+    "read-only",
+    "read only",
+    "no edits",
+    "without editing",
+];
+
+/// Word-start match, so "fix" hits "fixes" but never "prefix".
+fn has_word(hay: &str, word: &str) -> bool {
+    hay.match_indices(word).any(|(i, _)| {
+        !hay[..i]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpawnClass {
+    pub tier: &'static str,
+    pub mutating: bool,
+    pub reason: String,
+    pub files: Vec<String>,
+}
+
 pub(crate) struct Policy {
     raw: Value,
 }
@@ -150,8 +181,15 @@ impl Policy {
         self.raw.pointer(ptr).and_then(Value::as_u64)
     }
 
-    /// Spawn prompt -> tier: a mutating marker wins, else read-only by file count.
+    /// Spawn prompt -> tier.
     pub(crate) fn classify_spawn(&self, prompt: &str) -> &'static str {
+        self.classify_spawn_detail(prompt).tier
+    }
+
+    /// Spawn prompt -> tier plus telemetry facts. A read-only marker
+    /// ("do not edit", "read-only") wins, then a whole-word mutating marker,
+    /// else read-only by file count. Read-only never yields `code_execution`.
+    pub(crate) fn classify_spawn_detail(&self, prompt: &str) -> SpawnClass {
         let p = prompt.to_lowercase();
         let tier = |k: &str, d: &'static str| -> &'static str {
             let want = self
@@ -163,12 +201,6 @@ impl Policy {
                 .find(|t| Some(*t) == want)
                 .unwrap_or(d)
         };
-        if strs(&self.raw, "/swarm_classification/mutating_markers")
-            .iter()
-            .any(|m| p.contains(m.as_str()))
-        {
-            return tier("mutating_tier", CODE_TIER);
-        }
         let re = match self
             .raw
             .pointer("/swarm_classification/file_token_regex")
@@ -182,17 +214,59 @@ impl Policy {
             }
             None => None,
         };
-        let files: HashSet<&str> = match &re {
-            Some(re) => re.find_iter(&p).map(|m| m.as_str()).collect(),
-            None => HashSet::new(),
+        let mut files: Vec<String> = match &re {
+            Some(re) => re.find_iter(&p).map(|m| m.as_str().to_string()).collect(),
+            None => Vec::new(),
         };
+        files.sort();
+        files.dedup();
+        let mut ro = strs(&self.raw, "/swarm_classification/read_only_markers");
+        if ro.is_empty() {
+            ro = DEFAULT_READ_ONLY_MARKERS
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        }
+        let read_only = ro.iter().find(|m| p.contains(m.as_str()));
+        let mutating = match read_only {
+            Some(_) => None,
+            None => strs(&self.raw, "/swarm_classification/mutating_markers")
+                .into_iter()
+                .find(|m| has_word(&p, m)),
+        };
+        if let Some(m) = mutating {
+            return SpawnClass {
+                tier: match tier("mutating_tier", CODE_TIER) {
+                    t if t == LOCAL_TIER => CODE_TIER,
+                    t => t,
+                },
+                mutating: true,
+                reason: format!("mutating_marker:{m}"),
+                files,
+            };
+        }
         let small = self
             .num("/swarm_classification/small_max_files")
             .unwrap_or(3) as usize;
-        if !files.is_empty() && files.len() <= small {
-            tier("small_read_only_tier", LOCAL_TIER)
+        let why = read_only.map_or("no_mutating_marker".to_string(), |m| {
+            format!("read_only_marker:{m}")
+        });
+        let (t, reason) = if !files.is_empty() && files.len() <= small {
+            (
+                tier("small_read_only_tier", LOCAL_TIER),
+                format!("{why};files<={small}"),
+            )
         } else {
-            tier("read_only_tier", SWARM_TIER)
+            (
+                tier("read_only_tier", SWARM_TIER),
+                format!("{why};files={}", files.len()),
+            )
+        };
+        SpawnClass {
+            tier: if t == CODE_TIER { SWARM_TIER } else { t },
+            mutating: false,
+            reason,
+            files,
         }
     }
 
@@ -878,6 +952,36 @@ pub(crate) struct Dispatch {
     pub sticky: bool,
     pub over_budget: bool,
     pub payload_tokens: u64,
+}
+
+/// The `swarm_dispatch` telemetry row: `reason`, `mutating`, `files` are never null.
+pub(crate) fn dispatch_event(
+    session_id: &str,
+    class: &SpawnClass,
+    picked: Option<&Dispatch>,
+    elapsed: Duration,
+) -> Value {
+    let reason = match picked {
+        Some(d) if d.tier != class.tier => format!("{};spilled_to:{}", class.reason, d.tier),
+        Some(_) => class.reason.clone(),
+        None => format!("{};no_eligible_route", class.reason),
+    };
+    serde_json::json!({
+        "event": "swarm_dispatch",
+        "session_id": session_id,
+        "source": "routing-policy.json",
+        "requested_tier": picked.map_or(class.tier, |d| d.requested_tier),
+        "tier": picked.map(|d| d.tier),
+        "route": picked.map(|d| route_id(&d.route)),
+        "billing": picked.map(|d| d.billing.as_str()),
+        "sticky": picked.map(|d| d.sticky),
+        "over_budget": picked.map(|d| d.over_budget),
+        "payload_tokens": picked.map(|d| d.payload_tokens),
+        "reason": reason,
+        "mutating": class.mutating,
+        "files": class.files,
+        "ms": elapsed.as_millis() as u64,
+    })
 }
 
 /// Full 4-tier dispatch: classify the spawn prompt, apply breakers, budget,

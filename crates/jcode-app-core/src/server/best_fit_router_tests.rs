@@ -706,3 +706,49 @@ fn state_path_and_telemetry_follow_jcode_home_when_no_override() {
         assert!(rows.contains("\"event\":\"probe\""), "{rows}");
     });
 }
+
+#[test]
+fn read_only_prompts_never_pick_code_execution() {
+    let p = Policy::from_json(POLICY).unwrap();
+    for prompt in [
+        "Audit src/a.rs for bugs. Do not edit anything.",
+        "Read-only: grep the repo for unsafe and report; do not write files",
+        "Inspect the prefix handling in src/x.rs",
+        "Review how errors are created in a.rs b.rs c.rs d.rs, read only",
+    ] {
+        let c = p.classify_spawn_detail(prompt);
+        assert!(!c.mutating, "{prompt}");
+        assert_ne!(c.tier, CODE_TIER, "{prompt}");
+    }
+    let c = p.classify_spawn_detail("Audit src/a.rs for bugs. Do not edit anything.");
+    assert_eq!(c.tier, LOCAL_TIER);
+    assert_eq!(c.files, vec!["src/a.rs".to_string()]);
+    let m = p.classify_spawn_detail("Fix the bug in src/a.rs");
+    assert!(m.mutating);
+    assert_eq!(m.tier, CODE_TIER);
+    assert_eq!(m.reason, "mutating_marker:fix");
+}
+
+#[test]
+fn swarm_dispatch_event_has_non_null_reason_mutating_files() {
+    let p = Policy::from_json(POLICY).unwrap();
+    let c = p.classify_spawn_detail("Do not edit anything. Summarize README.md");
+    for picked in [
+        None,
+        Some(Dispatch {
+            route: route("m", "ollama", "(http://127.0.0.1:11434)", None, 0),
+            billing: Billing::Local,
+            tier: SWARM_TIER,
+            requested_tier: c.tier,
+            sticky: false,
+            over_budget: false,
+            payload_tokens: 1,
+        }),
+    ] {
+        let ev = dispatch_event("s", &c, picked.as_ref(), Duration::from_millis(1));
+        assert_eq!(ev["event"], "swarm_dispatch");
+        assert_eq!(ev["mutating"], false);
+        assert!(ev["reason"].as_str().is_some_and(|r| !r.is_empty()));
+        assert_eq!(ev["files"], serde_json::json!(["readme.md"]));
+    }
+}
